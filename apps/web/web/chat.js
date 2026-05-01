@@ -1,0 +1,164 @@
+// Center column: WebSocket chat with token streaming.
+import { state, on, set } from "/static/state.js";
+
+const messagesEl = document.getElementById("messages");
+const composer = document.getElementById("composer");
+const input = document.getElementById("input");
+const sendBtn = document.getElementById("send");
+const orb = document.getElementById("orb");
+const statusText = document.getElementById("status-text");
+
+let socket = null;
+let currentAssistant = null; // DOM node accumulating tokens
+let pendingTurn = false;
+
+function setStatus(label, mode) {
+  statusText.textContent = label;
+  orb.className = `orb ${mode || "idle"}`;
+}
+
+function renderMessage(role, content) {
+  const el = document.createElement("article");
+  el.className = `message ${role}`;
+  const label = document.createElement("div");
+  label.className = "role-label";
+  label.textContent = role === "user" ? "나" : role === "assistant" ? "비서" : role;
+  const body = document.createElement("div");
+  body.className = "body";
+  body.textContent = content;
+  el.append(label, body);
+  messagesEl.append(el);
+  messagesEl.scrollTop = messagesEl.scrollHeight;
+  return body;
+}
+
+function renderError(message) {
+  const el = document.createElement("article");
+  el.className = "message error";
+  el.textContent = `⚠ ${message}`;
+  messagesEl.append(el);
+  messagesEl.scrollTop = messagesEl.scrollHeight;
+}
+
+function clearMessages() {
+  messagesEl.innerHTML = "";
+}
+
+async function loadSessionMessages(sessionId) {
+  clearMessages();
+  if (!sessionId) return;
+  try {
+    const r = await fetch(`/api/sessions/${sessionId}/messages`);
+    if (!r.ok) throw new Error(`HTTP ${r.status}`);
+    const msgs = await r.json();
+    for (const m of msgs) renderMessage(m.role, m.content);
+  } catch (err) {
+    renderError(`이전 메시지 로드 실패: ${err.message}`);
+  }
+}
+
+function connect() {
+  const proto = location.protocol === "https:" ? "wss" : "ws";
+  socket = new WebSocket(`${proto}://${location.host}/ws/chat`);
+
+  socket.addEventListener("open", () => setStatus("연결됨", "idle"));
+  socket.addEventListener("close", () => {
+    setStatus("연결 끊김 — 재연결 중", "error");
+    setTimeout(connect, 1500);
+  });
+  socket.addEventListener("error", () => setStatus("WS 오류", "error"));
+
+  socket.addEventListener("message", (ev) => {
+    let msg;
+    try {
+      msg = JSON.parse(ev.data);
+    } catch {
+      return;
+    }
+
+    switch (msg.type) {
+      case "hello":
+        // schema_version handshake; ignored for now.
+        break;
+
+      case "recall":
+        document.dispatchEvent(
+          new CustomEvent("her:recall", { detail: msg }),
+        );
+        break;
+
+      case "token":
+        if (msg.session_id && msg.session_id !== state.sessionId) {
+          set("sessionId", msg.session_id);
+        }
+        if (!currentAssistant) {
+          currentAssistant = renderMessage("assistant", "");
+        }
+        currentAssistant.textContent += msg.text || "";
+        messagesEl.scrollTop = messagesEl.scrollHeight;
+        break;
+
+      case "done":
+        currentAssistant = null;
+        pendingTurn = false;
+        sendBtn.disabled = false;
+        setStatus("준비 완료", "idle");
+        document.dispatchEvent(new CustomEvent("her:turn-complete"));
+        break;
+
+      case "error":
+        renderError(msg.message || "알 수 없는 오류");
+        currentAssistant = null;
+        pendingTurn = false;
+        sendBtn.disabled = false;
+        setStatus("오류", "error");
+        break;
+    }
+  });
+}
+
+function sendMessage(content) {
+  if (!socket || socket.readyState !== WebSocket.OPEN) {
+    renderError("WS 가 아직 연결되지 않았어요. 잠시 후 다시 시도하세요.");
+    return;
+  }
+  pendingTurn = true;
+  sendBtn.disabled = true;
+  setStatus("생각 중", "thinking");
+  renderMessage("user", content);
+  socket.send(
+    JSON.stringify({
+      type: "message",
+      content,
+      session_id: state.sessionId ?? null,
+    }),
+  );
+}
+
+composer.addEventListener("submit", (ev) => {
+  ev.preventDefault();
+  if (pendingTurn) return;
+  const value = input.value.trim();
+  if (!value) return;
+  input.value = "";
+  input.style.height = "auto";
+  sendMessage(value);
+});
+
+input.addEventListener("keydown", (ev) => {
+  if (ev.key === "Enter" && !ev.shiftKey) {
+    ev.preventDefault();
+    composer.requestSubmit();
+  }
+});
+
+input.addEventListener("input", () => {
+  input.style.height = "auto";
+  input.style.height = Math.min(input.scrollHeight, 200) + "px";
+});
+
+on("sessionId", (sid) => {
+  loadSessionMessages(sid);
+});
+
+connect();

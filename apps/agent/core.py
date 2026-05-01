@@ -25,7 +25,7 @@ from apps.agent.multimodal import parts_from_attachment_refs
 from apps.agent.recall import RecallContext, recall
 from apps.agent.world_context import get_world_state_block, init_world_state_cache
 from apps.memory.store import MemoryStore
-from apps.presence import Event, EventBus
+from apps.web import Event, EventBus
 
 log = structlog.get_logger(__name__)
 

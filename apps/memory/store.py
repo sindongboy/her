@@ -141,7 +141,13 @@ class MemoryStore:
         self._migrate_or_rebuild()
 
     def _connect(self) -> None:
-        self.conn = sqlite3.connect(self.db_path, isolation_level=None)
+        # check_same_thread=False because FastAPI/Starlette run async routes in
+        # a worker thread distinct from the one that built the store. Access is
+        # serialised by the asyncio loop in production and by the test runner
+        # in tests, so it is safe to share the connection across threads.
+        self.conn = sqlite3.connect(
+            self.db_path, isolation_level=None, check_same_thread=False
+        )
         self.conn.row_factory = sqlite3.Row
         self.conn.enable_load_extension(True)
         sqlite_vec.load(self.conn)

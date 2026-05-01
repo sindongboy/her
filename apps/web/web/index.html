@@ -1,0 +1,72 @@
+<!DOCTYPE html>
+<html lang="ko">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>her</title>
+    <link rel="stylesheet" href="/static/styles.css" />
+  </head>
+  <body>
+    <div class="app">
+      <header class="topbar">
+        <div class="brand">
+          <span class="logo">her</span>
+          <span class="tagline" id="session-title">— 가족같이 곁에 있는 비서</span>
+        </div>
+        <div class="status">
+          <span id="orb" class="orb idle" aria-hidden="true"></span>
+          <span id="status-text" class="status-text">준비 완료</span>
+        </div>
+      </header>
+
+      <aside class="left-panel" aria-label="대화 세션 목록">
+        <div class="panel-head">
+          <h2>대화</h2>
+          <button id="new-session" class="ghost-btn" type="button">+ 새 대화</button>
+        </div>
+        <ul id="session-list" class="session-list" role="list"></ul>
+      </aside>
+
+      <main class="chat-panel" aria-label="채팅">
+        <div id="messages" class="messages" role="log" aria-live="polite"></div>
+        <form id="composer" class="composer" autocomplete="off">
+          <textarea
+            id="input"
+            class="input"
+            placeholder="무엇이든 물어보세요. Enter 전송, Shift+Enter 줄바꿈."
+            rows="1"
+            aria-label="메시지 입력"
+          ></textarea>
+          <button type="submit" id="send" class="primary-btn">보내기</button>
+        </form>
+      </main>
+
+      <aside class="right-panel" aria-label="메모리 프로브">
+        <div class="panel-head">
+          <h2>메모리 프로브</h2>
+        </div>
+
+        <section class="probe-section">
+          <h3>이번 답변에 떠올린 기억</h3>
+          <div id="probe-recall" class="probe-recall">
+            <p class="empty">아직 비어 있어요. 질문을 보내면 채워집니다.</p>
+          </div>
+        </section>
+
+        <section class="probe-section">
+          <h3>최근 메모</h3>
+          <ul id="recent-notes" class="probe-list"></ul>
+        </section>
+
+        <section class="probe-section">
+          <h3>알고 있는 사람</h3>
+          <ul id="recent-people" class="probe-list"></ul>
+        </section>
+      </aside>
+    </div>
+
+    <script type="module" src="/static/sessions.js"></script>
+    <script type="module" src="/static/chat.js"></script>
+    <script type="module" src="/static/memory.js"></script>
+  </body>
+</html>
