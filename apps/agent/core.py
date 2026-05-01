@@ -4,11 +4,9 @@ Wires together: Memory recall → anonymization → Gemini LLM → de-anonymize
 → persist → return AgentResponse.
 
 CLAUDE.md references:
-  §2.1  Voice-friendly output when channel='voice' (no markdown)
   §2.3  Anonymization only at LLM boundary
   §3.1  Gemini exclusive
-  §4    Channel-agnostic envelope; Agent Core knows no channel details
-  §5.4  3-strategy recall
+  §5.4  Recall strategy
 """
 
 from __future__ import annotations
@@ -56,16 +54,8 @@ _SUMMARY_MAX_CHARS = 200
 
 _SYSTEM_BASE = """당신은 따뜻하고 가까운 가족 같은 AI 비서입니다.
 사용자와 그 가족을 기억하고, 일정과 이벤트를 챙기며, 먼저 제안합니다.
-한국어로 자연스럽게 대화하세요. 사용자가 영어로 말하면 영어로 답하세요."""
-
-_SYSTEM_VOICE_ADDON = """
-지금 출력 채널은 음성(TTS)입니다. 반드시 다음 규칙을 따르세요:
-- 마크다운(#, **, -, 번호 목록 등) 사용 금지
-- 짧고 자연스러운 구어체 문장으로만 응답
-- 리스트가 필요하면 "첫째, 둘째, 셋째"처럼 말로 표현"""
-
-_SYSTEM_TEXT_ADDON = """
-지금 출력 채널은 텍스트입니다. 마크다운을 적절히 활용해 가독성을 높이세요."""
+한국어로 자연스럽게 대화하세요. 사용자가 영어로 말하면 영어로 답하세요.
+응답은 텍스트 웹 UI 에 표시되므로 마크다운을 적절히 활용해 가독성을 높이세요."""
 
 
 @dataclass(slots=True, frozen=True)
@@ -153,22 +143,20 @@ class AgentCore:
         message: str,
         *,
         episode_id: int | None = None,
-        channel: str = "text",
         attachments: list[AttachmentRef] | None = None,
     ) -> AgentResponse:
         """Full response cycle: recall → LLM → persist → return."""
-        ep_id = await self._ensure_episode(episode_id, channel)
+        ep_id = await self._ensure_episode(episode_id)
         log.info(
             "agent.respond.start",
             episode_id=ep_id,
-            channel=channel,
             attachment_count=len(attachments) if attachments else 0,
         )
 
         ctx = await recall(self.store, message, self._gemini, episode_id=ep_id)
 
-        system_prompt = _build_system_prompt(channel)
-        messages, alias_map = self._build_messages(message, ctx, channel)
+        system_prompt = _build_system_prompt()
+        messages, alias_map = self._build_messages(message, ctx)
 
         # Build multimodal parts from attachments (binary / text files).
         extra_parts = parts_from_attachment_refs(attachments) if attachments else []
@@ -213,25 +201,23 @@ class AgentCore:
         message: str,
         *,
         episode_id: int | None = None,
-        channel: str = "text",
         attachments: list[AttachmentRef] | None = None,
     ) -> AsyncIterator[str]:
         """Streaming response. Yields chunks; persists assembled text at end."""
-        ep_id = await self._ensure_episode(episode_id, channel)
+        ep_id = await self._ensure_episode(episode_id)
         log.info(
             "agent.stream.start",
             episode_id=ep_id,
-            channel=channel,
             attachment_count=len(attachments) if attachments else 0,
         )
 
         ctx = await recall(self.store, message, self._gemini, episode_id=ep_id)
 
-        # Emit memory_recall events (capped at top-3 each kind — ambient orb only).
-        self._publish_recall_events(ctx, channel)
+        # Emit memory_recall events (top-3 each kind for the ambient UI signal).
+        self._publish_recall_events(ctx)
 
-        system_prompt = _build_system_prompt(channel)
-        messages, alias_map = self._build_messages(message, ctx, channel)
+        system_prompt = _build_system_prompt()
+        messages, alias_map = self._build_messages(message, ctx)
 
         extra_parts = parts_from_attachment_refs(attachments) if attachments else []
 
@@ -251,7 +237,7 @@ class AgentCore:
                     self._bus,
                     Event(
                         type="response_chunk",
-                        payload={"text": chunk, "channel": channel},
+                        payload={"text": chunk},
                         ts=time.monotonic(),
                     ),
                 )
@@ -327,7 +313,7 @@ class AgentCore:
             async for chunk in gen(messages, system=system, parts=parts):
                 yield chunk
 
-    async def _ensure_episode(self, episode_id: int | None, channel: str) -> int:
+    async def _ensure_episode(self, episode_id: int | None) -> int:
         """Return existing episode_id or create a new episode row.
 
         SQLite connections are single-threaded; we call store.conn directly
@@ -335,23 +321,20 @@ class AgentCore:
         """
         if episode_id is not None:
             return episode_id
-        return self._create_episode(channel)
+        return self._create_episode()
 
-    def _create_episode(self, channel: str) -> int:
+    def _create_episode(self) -> int:
         """Insert a new episode row and return its id (synchronous)."""
-        # Try typed method first (memory-eng may have provided it).
         add_episode = getattr(self.store, "add_episode", None)
         if callable(add_episode):
             try:
-                return int(add_episode(channel=channel))
+                return int(add_episode(primary_channel="text"))
             except TypeError:
-                pass  # Signature mismatch — fall through to raw SQL.
+                pass
 
-        # Raw SQL fallback — always available via store.conn.
         cur = self.store.conn.execute(
             "INSERT INTO episodes (when_at, summary, primary_channel) "
-            "VALUES (CURRENT_TIMESTAMP, NULL, ?)",
-            (channel,),
+            "VALUES (CURRENT_TIMESTAMP, NULL, 'text')",
         )
         return int(cur.lastrowid or 0)
 
@@ -359,7 +342,6 @@ class AgentCore:
         self,
         user_message: str,
         ctx: RecallContext,
-        channel: str,
     ) -> tuple[list[dict[str, str]], dict[str, str]]:
         """Build the messages list and alias map to send to Gemini."""
         people = self.store.list_people()
@@ -391,7 +373,7 @@ class AgentCore:
         )
         log.debug("agent.persist", episode_id=episode_id)
 
-    def _publish_recall_events(self, ctx: RecallContext, channel: str) -> None:
+    def _publish_recall_events(self, ctx: RecallContext) -> None:
         """Emit memory_recall events for the top-3 of each recalled kind.
 
         These drive optional ambient pulses on the orb — not critical-path.
@@ -477,10 +459,9 @@ def _load_persona() -> str:
         return _SYSTEM_BASE
 
 
-def _build_system_prompt(channel: str) -> str:
+def _build_system_prompt() -> str:
     base = _load_persona()
-    addon = _SYSTEM_VOICE_ADDON if channel == "voice" else _SYSTEM_TEXT_ADDON
-    return base + addon + get_world_state_block()
+    return base + get_world_state_block()
 
 
 def _format_recall_context(ctx: RecallContext) -> str:

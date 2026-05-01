@@ -6,11 +6,9 @@ Writes by hand-formatting (flat scalar fields only — no tomli_w dep needed).
 
 from __future__ import annotations
 
-import logging
 import os
 import tomllib
-from dataclasses import dataclass, field, fields
-from datetime import datetime, timezone
+from dataclasses import dataclass, fields
 from pathlib import Path
 
 import structlog
@@ -19,34 +17,40 @@ logger = structlog.get_logger(__name__)
 
 DEFAULT_SETTINGS_PATH = Path.home() / ".her" / "settings.toml"
 
-_SCHEMA_VERSION = 7
+_SCHEMA_VERSION = 8
 
 # Keys removed from older schema versions — silently dropped during load.
-# v5 collapsed three TTS keys (tts_provider, tts_model, tts_voice) into a
-# single `tts = [engine, voice]` array. Older files are migrated on load.
+# v8 ripped out the voice/daemon/proactive subsystem. The keys below all
+# come from earlier voice-era settings files; they're tolerated for one
+# migration cycle so existing TOML files load cleanly.
 _REMOVED_KEYS: frozenset[str] = frozenset(
-    {"wake_keyword_path", "tts_provider", "tts_model", "tts_voice"}
+    {
+        # v1–v4 transient keys
+        "wake_keyword_path",
+        "tts_provider",
+        "tts_model",
+        "tts_voice",
+        # v8 voice/daemon/proactive removal
+        "mic_consent_granted",
+        "mic_consent_at",
+        "quiet_mode",
+        "wake_keyword",
+        "daily_proactive_limit",
+        "silence_threshold_hours",
+        "stt_model",
+        "tts",
+        "echo_gate_ms",
+    }
 )
 
 
 @dataclass(slots=True)
 class Settings:
-    mic_consent_granted: bool = False
-    mic_consent_at: str | None = None
-    quiet_mode: bool = False
-    wake_keyword: str = "자기야"
-    daily_proactive_limit: int = 3
-    silence_threshold_hours: float = 4.0
-    # Phase 3.5+ — model + voice tunables. Env vars (HER_AGENT_MODEL etc.)
-    # take precedence over these so one-off overrides via shell still work.
+    # Web UI
+    web_host: str = "127.0.0.1"
+    web_port: int = 8765
+    # Model
     agent_model: str = "gemini-3.1-pro-preview"
-    stt_model: str = "medium"
-    # TTS as [engine, voice]. Engine is "say" (macOS local) or a Gemini TTS
-    # model id (e.g. "gemini-2.5-flash-preview-tts", "gemini-2.5-pro-preview-tts").
-    # Voice meaning depends on engine: macOS voice name when "say"; Gemini
-    # prebuilt voice (Kore, Aoede, Puck, ...) for Gemini engines.
-    tts: list[str] = field(default_factory=lambda: ["say", "Jian (Premium)"])
-    echo_gate_ms: int = 400
     # Location (default: Seoul). Used for weather lookup and system-prompt context.
     location_name: str = "서울"
     location_lat: float = 37.5665
@@ -88,17 +92,6 @@ def load_settings(path: Path | None = None) -> Settings:
 
     known = {f.name for f in fields(Settings)}
 
-    # ── v4 → v5 migration: collapse tts_provider/tts_model/tts_voice → tts ──
-    if "tts" not in raw and any(k in raw for k in ("tts_provider", "tts_model", "tts_voice")):
-        provider = raw.get("tts_provider", "say")
-        if provider == "gemini":
-            engine = raw.get("tts_model", "gemini-2.5-flash-preview-tts")
-        else:
-            engine = "say"
-        voice = raw.get("tts_voice", "Jian (Premium)")
-        raw["tts"] = [engine, voice]
-        logger.info("settings_tts_migrated_to_tuple", engine=engine)
-
     # Migration: keys removed in older schema versions are silently dropped.
     removed = set(raw) & _REMOVED_KEYS
     if removed:
@@ -116,12 +109,6 @@ def load_settings(path: Path | None = None) -> Settings:
         else:
             kwargs[f.name] = raw[f.name]
 
-    # Validate `tts` shape: must be a list of two non-empty strings.
-    tts = kwargs.get("tts")
-    if not (isinstance(tts, list) and len(tts) == 2 and all(isinstance(x, str) and x for x in tts)):
-        logger.warning("settings_tts_invalid_shape", value=tts)
-        kwargs["tts"] = list(getattr(defaults, "tts"))
-
     return Settings(**kwargs)
 
 
@@ -138,10 +125,6 @@ def _to_toml_value(value: object) -> str:
     if isinstance(value, str):
         escaped = value.replace("\\", "\\\\").replace('"', '\\"')
         return f'"{escaped}"'
-    if isinstance(value, list):
-        # Inline TOML array — only string-of-strings supported (sufficient for tts).
-        items = ", ".join(_to_toml_value(v) for v in value)
-        return f"[{items}]"
     raise TypeError(f"Unsupported TOML type: {type(value)}")
 
 

@@ -1,20 +1,13 @@
 [project]
 name = "her"
 version = "0.0.1"
-description = "Family-aware voice + text AI assistant — see CLAUDE.md"
+description = "Family-aware text chat AI assistant — JARVIS-style web UI; see CLAUDE.md"
 requires-python = ">=3.12"
 dependencies = [
     "google-genai>=0.3.0",
     "sqlite-vec>=0.1.0",
     "structlog>=24.0",
     "tenacity>=9.0",
-    # Phase 1 — Voice Channel
-    "sounddevice>=0.4",
-    "numpy>=1.26",
-    "silero-vad>=5.0",
-    "faster-whisper>=1.0",
-    # Phase 3 — Wake Word: reuses faster-whisper + silero-vad (no extra dep)
-    # Phase 3.5 — Presence Channel (orb WebSocket server)
     "fastapi>=0.115",
     "uvicorn[standard]>=0.30",
     "websockets>=13",

@@ -130,20 +130,12 @@ class TestRespond:
         assert len(fake_client.generate_calls) == 1
 
     @pytest.mark.asyncio
-    async def test_channel_text_default(
+    async def test_text_addon_in_system_prompt(
         self, agent: AgentCore, fake_client: FakeGeminiClient
     ) -> None:
         await agent.respond("안녕")
         system = fake_client.generate_calls[0]["system"]
-        assert "텍스트" in system or "text" in system.lower()
-
-    @pytest.mark.asyncio
-    async def test_channel_voice_system_prompt(
-        self, agent: AgentCore, fake_client: FakeGeminiClient
-    ) -> None:
-        await agent.respond("안녕", channel="voice")
-        system = fake_client.generate_calls[0]["system"]
-        assert "음성" in system or "TTS" in system
+        assert "텍스트" in system or "마크다운" in system
 
     @pytest.mark.asyncio
     async def test_episode_summary_updated(

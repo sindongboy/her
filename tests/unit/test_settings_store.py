@@ -11,35 +11,28 @@ import pytest
 from apps.settings.store import Settings, load_settings, save_settings, settings_path
 
 
-# ── Helpers ────────────────────────────────────────────────────────────────
-
 def _round_trip(tmp_path: Path, s: Settings) -> Settings:
     target = tmp_path / "settings.toml"
     save_settings(s, target)
     return load_settings(target)
 
 
-# ── Tests ──────────────────────────────────────────────────────────────────
-
 class TestLoadDefaults:
     def test_missing_file_returns_defaults(self, tmp_path: Path) -> None:
         missing = tmp_path / "nonexistent.toml"
         s = load_settings(missing)
         defaults = Settings()
-        assert s.mic_consent_granted == defaults.mic_consent_granted
-        assert s.quiet_mode == defaults.quiet_mode
-        assert s.wake_keyword == defaults.wake_keyword
-        assert s.daily_proactive_limit == defaults.daily_proactive_limit
-        assert s.schema_version == defaults.schema_version
-        assert s.schema_version == 7
-        assert s.tts == ["say", "Jian (Premium)"]
+        assert s.web_host == defaults.web_host == "127.0.0.1"
+        assert s.web_port == defaults.web_port == 8765
+        assert s.agent_model == defaults.agent_model
+        assert s.schema_version == defaults.schema_version == 8
 
     def test_missing_key_uses_default(self, tmp_path: Path) -> None:
         target = tmp_path / "partial.toml"
-        target.write_text('mic_consent_granted = true\n', encoding="utf-8")
+        target.write_text('web_port = 9000\n', encoding="utf-8")
         s = load_settings(target)
-        assert s.mic_consent_granted is True
-        assert s.wake_keyword == Settings().wake_keyword  # default applied
+        assert s.web_port == 9000
+        assert s.web_host == Settings().web_host
 
     def test_invalid_toml_returns_defaults(self, tmp_path: Path) -> None:
         target = tmp_path / "broken.toml"
@@ -52,89 +45,85 @@ class TestRoundTrip:
     def test_default_round_trip(self, tmp_path: Path) -> None:
         s = Settings()
         loaded = _round_trip(tmp_path, s)
-        assert loaded.mic_consent_granted == s.mic_consent_granted
-        assert loaded.quiet_mode == s.quiet_mode
-        assert loaded.wake_keyword == s.wake_keyword
-        assert loaded.daily_proactive_limit == s.daily_proactive_limit
-        assert loaded.schema_version == s.schema_version
+        assert loaded == s
 
     def test_modified_values_round_trip(self, tmp_path: Path) -> None:
         from dataclasses import replace
 
         s = replace(
             Settings(),
-            mic_consent_granted=True,
-            mic_consent_at="2026-05-01T00:00:00+00:00",
-            quiet_mode=True,
-            wake_keyword="비서야",
-            daily_proactive_limit=5,
+            web_port=9000,
+            agent_model="gemini-3.1-pro-preview",
+            location_name="부산",
+            enable_calendar=False,
         )
         loaded = _round_trip(tmp_path, s)
-        assert loaded.mic_consent_granted is True
-        assert loaded.mic_consent_at == "2026-05-01T00:00:00+00:00"
-        assert loaded.quiet_mode is True
-        assert loaded.wake_keyword == "비서야"
-        assert loaded.daily_proactive_limit == 5
+        assert loaded.web_port == 9000
+        assert loaded.location_name == "부산"
+        assert loaded.enable_calendar is False
 
 
 class TestUnknownKeys:
-    def test_unknown_key_is_ignored(self, tmp_path: Path, capsys: pytest.CaptureFixture) -> None:
+    def test_unknown_key_is_ignored(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
         target = tmp_path / "extra.toml"
         target.write_text(
-            'unknown_future_field = "hello"\nquiet_mode = true\n',
+            'unknown_future_field = "hello"\nweb_port = 9000\n',
             encoding="utf-8",
         )
         s = load_settings(target)
-        assert s.quiet_mode is True
-        # structlog prints to stdout; verify the unknown key name appears in output
+        assert s.web_port == 9000
         captured = capsys.readouterr()
         assert "unknown_future_field" in captured.out
 
-    def test_unknown_keys_do_not_raise(self, tmp_path: Path) -> None:
-        target = tmp_path / "extra2.toml"
-        target.write_text('foo = 1\nbar = "baz"\n', encoding="utf-8")
-        s = load_settings(target)
-        assert isinstance(s, Settings)
-
 
 class TestSchemaMigration:
-    def test_v1_file_with_wake_keyword_path_loads_cleanly(self, tmp_path: Path) -> None:
-        """Schema v1 file that includes the removed wake_keyword_path key loads
-        without error.  The removed key is silently dropped (info-logged, not
-        an error/warning) and the resulting Settings is valid v2."""
-        target = tmp_path / "v1_settings.toml"
+    def test_v7_voice_keys_dropped_silently(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """A pre-v8 file with mic_consent/quiet_mode/wake_keyword/tts/etc loads
+        cleanly: removed keys are info-logged, not warned, and the resulting
+        Settings is a valid v8 with default values for the new fields."""
+        target = tmp_path / "v7_settings.toml"
         target.write_text(
-            'schema_version = 1\n'
+            'schema_version = 7\n'
             'mic_consent_granted = true\n'
-            'wake_keyword = "자기야"\n'
-            'wake_keyword_path = "/old/path/custom.ppn"\n'
+            'mic_consent_at = "2026-04-30T00:00:00+00:00"\n'
             'quiet_mode = false\n'
-            'daily_proactive_limit = 3\n',
+            'wake_keyword = "자기야"\n'
+            'daily_proactive_limit = 3\n'
+            'silence_threshold_hours = 4.0\n'
+            'stt_model = "medium"\n'
+            'tts = ["say", "Jian (Premium)"]\n'
+            'echo_gate_ms = 400\n'
+            'agent_model = "gemini-3.1-pro-preview"\n'
+            'location_name = "서울"\n',
             encoding="utf-8",
         )
         s = load_settings(target)
         assert isinstance(s, Settings)
-        assert s.mic_consent_granted is True
-        assert s.wake_keyword == "자기야"
-        # wake_keyword_path must not exist on the new Settings dataclass
-        assert not hasattr(s, "wake_keyword_path")
+        assert s.agent_model == "gemini-3.1-pro-preview"
+        assert s.location_name == "서울"
+        # Removed keys must not exist on the new Settings dataclass
+        for removed in ("mic_consent_granted", "quiet_mode", "wake_keyword", "tts"):
+            assert not hasattr(s, removed)
 
-    def test_v1_file_wake_keyword_path_does_not_cause_warning(
-        self, tmp_path: Path, capsys: pytest.CaptureFixture
+    def test_v7_removed_keys_are_not_unknown_warnings(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
     ) -> None:
-        """wake_keyword_path from v1 is treated as a known-removed field, so
-        it must NOT appear in the 'unknown keys' warning output."""
-        target = tmp_path / "v1_compat.toml"
+        target = tmp_path / "v7_compat.toml"
         target.write_text(
-            'wake_keyword_path = "/old/path/custom.ppn"\n'
-            'quiet_mode = true\n',
+            'wake_keyword = "비서야"\n'
+            'mic_consent_granted = true\n'
+            'web_port = 9000\n',
             encoding="utf-8",
         )
         s = load_settings(target)
-        assert s.quiet_mode is True
+        assert s.web_port == 9000
         captured = capsys.readouterr()
-        # Should NOT appear as an unknown key warning
-        assert "wake_keyword_path" not in captured.out or "settings_unknown_keys" not in captured.out
+        # Removed keys go through info path, not unknown_keys warning.
+        assert "settings_unknown_keys" not in captured.out
 
 
 class TestAtomicWrite:
@@ -150,10 +139,9 @@ class TestAtomicWrite:
         from dataclasses import replace
 
         target = tmp_path / "settings.toml"
-        original = replace(Settings(), quiet_mode=False, daily_proactive_limit=3)
+        original = replace(Settings(), web_port=8765)
         save_settings(original, target)
 
-        # Simulate crash: monkeypatch os.replace to raise on second call
         call_count = 0
         real_replace = os.replace
 
@@ -166,23 +154,25 @@ class TestAtomicWrite:
 
         monkeypatch.setattr(os, "replace", flaky_replace)
         with pytest.raises(OSError, match="simulated crash"):
-            save_settings(replace(Settings(), quiet_mode=True, daily_proactive_limit=99), target)
+            save_settings(replace(Settings(), web_port=9999), target)
 
-        # Original must survive intact
         loaded = load_settings(target)
-        assert loaded.quiet_mode is False
-        assert loaded.daily_proactive_limit == 3
+        assert loaded.web_port == 8765
 
     def test_written_file_is_valid_toml(self, tmp_path: Path) -> None:
         target = tmp_path / "settings.toml"
         save_settings(Settings(), target)
         with open(target, "rb") as fh:
             parsed = tomllib.load(fh)
-        assert "mic_consent_granted" in parsed
+        assert "web_host" in parsed
+        assert "web_port" in parsed
+        assert parsed["schema_version"] == 8
 
 
 class TestPathOverride:
-    def test_her_settings_path_env(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_her_settings_path_env(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         custom = tmp_path / "custom_settings.toml"
         monkeypatch.setenv("HER_SETTINGS_PATH", str(custom))
         result = settings_path()
@@ -193,11 +183,13 @@ class TestPathOverride:
         result = settings_path()
         assert result == Path.home() / ".her" / "settings.toml"
 
-    def test_load_uses_env_override(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_load_uses_env_override(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         from dataclasses import replace
 
         custom = tmp_path / "env_settings.toml"
-        save_settings(replace(Settings(), quiet_mode=True), custom)
+        save_settings(replace(Settings(), web_port=9100), custom)
         monkeypatch.setenv("HER_SETTINGS_PATH", str(custom))
         s = load_settings()
-        assert s.quiet_mode is True
+        assert s.web_port == 9100
