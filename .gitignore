@@ -1,0 +1,52 @@
+# ── Secrets / env ──────────────────────────────────────────────
+# Never commit real keys. .envrc.example is the only template that's tracked.
+.envrc
+.env
+.env.*
+!.envrc.example
+!.env.example
+secrets/
+
+# ── User & family data (per CLAUDE.md §10 — must never leave the box) ──
+data/db.sqlite
+data/db.sqlite-journal
+data/db.sqlite-wal
+data/db.sqlite-shm
+data/attachments/
+data/audio_logs/
+data/consolidation_log/
+
+# ── Python ─────────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+.venv/
+venv/
+env/
+
+# ── Build artifacts ────────────────────────────────────────────
+build/
+dist/
+*.egg-info/
+*.egg
+
+# ── Tooling caches ─────────────────────────────────────────────
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+.tox/
+
+# ── IDE & OS ───────────────────────────────────────────────────
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+
+# ── Logs ───────────────────────────────────────────────────────
+*.log

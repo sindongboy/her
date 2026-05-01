@@ -1,0 +1,33 @@
+# .envrc.example — direnv config template for the `her` project
+#
+# Usage:
+#   1)  cp .envrc.example .envrc
+#   2)  edit .envrc and replace REPLACE_ME with your real key
+#   3)  direnv allow
+#   4)  make first-run   ← runs consent + env-var sanity checks (Phase 3+)
+#
+# IMPORTANT:
+#   - .envrc must be gitignored — never commit real keys.
+#   - This .envrc.example file is committed to the repo and stays as a template.
+#   - If you don't have direnv installed:  brew install direnv  (then add the shell hook).
+
+# ── Required (Phase 0) ────────────────────────────────────────────────
+# Google AI Studio → API keys → create.
+#   https://aistudio.google.com/apikey
+# Used for:
+#   - gemini-3.1-pro-preview         (main reasoning, both channels)
+#   - gemini-2.5-flash               (Consolidator / batch)
+#   - gemini-embedding-001           (memory embeddings, 768d)
+#   - gemini-2.5-flash-preview-tts   (TTS — Phase 1+, no separate key)
+export GEMINI_API_KEY="REPLACE_ME"
+
+# ── Optional / later phases ───────────────────────────────────────────
+# Phase 1+ : TTS uses gemini-2.5-flash-preview-tts via the GEMINI_API_KEY above.
+#            Offline fallback: macOS `say -v Yuna` (no key required).
+
+# Phase 3+ : Wake word uses local faster-whisper (no extra key needed).
+
+# ── Project knobs (defaults are usually fine) ─────────────────────────
+# export HER_DATA_DIR="${PWD}/data"
+# export HER_LOG_LEVEL="INFO"           # DEBUG | INFO | WARNING | ERROR
+# export HER_DB_PATH="${PWD}/data/db.sqlite"

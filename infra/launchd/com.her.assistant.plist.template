@@ -1,0 +1,81 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  launchd plist template for the her background daemon.
+  Placeholders __HOME__ and __PROJECT__ are substituted by `bin/her install`.
+
+  ⚠️  IMPORTANT — API keys and environment variables under launchd:
+  direnv is NOT executed by launchd, so GEMINI_API_KEY will NOT be available
+  unless you add it explicitly.  Wake word uses local Whisper — no extra key.
+
+  Option A (recommended for personal use):
+    Add to ~/.her/env:
+        export GEMINI_API_KEY=your-key-here
+    Then add the following to the EnvironmentVariables dict below:
+        <key>GEMINI_API_KEY</key><string>YOUR_KEY_HERE</string>
+
+  Option B (use `bin/her start` instead of launchd):
+    `bin/her start` launches the daemon directly in your shell session where
+    direnv has already exported the variables.
+    사용자 팁: direnv 환경 변수가 launchd 에서 보이지 않으면,
+    ~/.her/env 파일에 export 후 plist 의 EnvironmentVariables 에 추가하거나
+    bin/her start 로 부팅하세요.
+-->
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.her.assistant</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>__HOME__/.local/bin/uv</string>
+        <string>run</string>
+        <string>--directory</string>
+        <string>__PROJECT__</string>
+        <string>python</string>
+        <string>-m</string>
+        <string>apps.daemon</string>
+        <string>--db</string>
+        <string>__PROJECT__/data/db.sqlite</string>
+        <string>--log-dir</string>
+        <string>__HOME__/.her/logs</string>
+    </array>
+
+    <key>WorkingDirectory</key>
+    <string>__PROJECT__</string>
+
+    <!-- Start automatically when the user logs in -->
+    <key>RunAtLoad</key>
+    <true/>
+
+    <!-- Restart on crash; do NOT restart on clean exit (code 0) or EX_CONFIG (78) -->
+    <key>KeepAlive</key>
+    <dict>
+        <key>SuccessfulExit</key>
+        <false/>
+    </dict>
+
+    <!-- Redirect stdout/stderr to log files for debugging -->
+    <key>StandardOutPath</key>
+    <string>__HOME__/.her/logs/her.stdout.log</string>
+
+    <key>StandardErrorPath</key>
+    <string>__HOME__/.her/logs/her.stderr.log</string>
+
+    <!-- Non-secret environment variables only.
+         Add GEMINI_API_KEY manually (see header comment).
+         Wake word uses local Whisper — no additional key required. -->
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>HER_DATA_DIR</key>
+        <string>__PROJECT__/data</string>
+
+        <key>HER_DB_PATH</key>
+        <string>__PROJECT__/data/db.sqlite</string>
+
+        <key>HER_LOG_DIR</key>
+        <string>__HOME__/.her/logs</string>
+    </dict>
+</dict>
+</plist>

@@ -1,0 +1,39 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8" />
+  <title>her</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <link rel="preconnect" href="https://cdn.jsdelivr.net" />
+  <link
+    href="https://cdn.jsdelivr.net/gh/orioncactus/pretendard@v1.3.9/dist/web/static/pretendard.css"
+    rel="stylesheet"
+  />
+  <link rel="stylesheet" href="/static/styles.css" />
+</head>
+<body>
+  <!-- Status label: top-left, very low opacity -->
+  <div id="status" aria-live="polite"></div>
+
+  <!-- WS connection dot: top-right -->
+  <div id="conn" aria-label="connection status" aria-live="off"></div>
+
+  <!-- Three.js canvas fills the entire viewport -->
+  <canvas id="orb"></canvas>
+
+  <!-- Subtitle band: lower-quarter, centered -->
+  <div id="subtitles" aria-live="polite"></div>
+
+  <!-- importmap: three core + addons (post-processing, etc.) -->
+  <script type="importmap">
+    {
+      "imports": {
+        "three":        "https://cdn.jsdelivr.net/npm/three@0.169.0/build/three.module.js",
+        "three/addons/":"https://cdn.jsdelivr.net/npm/three@0.169.0/examples/jsm/"
+      }
+    }
+  </script>
+
+  <script type="module" src="/static/main.js"></script>
+</body>
+</html>
