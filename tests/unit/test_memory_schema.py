@@ -1,11 +1,19 @@
-"""Schema-level sanity checks. These guard against silent regressions in the
-SQLite + sqlite-vec setup (extension load, vec0 virtual table, FK pragma)."""
+"""Schema-level sanity checks for the v2 layout — guards extension load,
+vec0 virtual tables, FK pragma, message role check, and version stamp."""
 
 from __future__ import annotations
 
+import sqlite3
 import struct
 
-from apps.memory import EMBED_DIM, MemoryStore
+import pytest
+
+from apps.memory import EMBED_DIM, SCHEMA_VERSION, MemoryStore
+
+
+def test_schema_version_pragma(store: MemoryStore) -> None:
+    v = store.conn.execute("PRAGMA user_version").fetchone()[0]
+    assert v == SCHEMA_VERSION == 2
 
 
 def test_foreign_keys_pragma_is_on(store: MemoryStore) -> None:
@@ -13,45 +21,61 @@ def test_foreign_keys_pragma_is_on(store: MemoryStore) -> None:
     assert fk == 1
 
 
-def test_vec0_virtual_table_present(store: MemoryStore) -> None:
+def test_required_tables_present(store: MemoryStore) -> None:
+    rows = store.conn.execute(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'"
+    ).fetchall()
+    names = {r["name"] for r in rows}
+    for required in (
+        "people",
+        "sessions",
+        "messages",
+        "events",
+        "facts",
+        "preferences",
+        "notes",
+        "attachments",
+        "session_embedding_meta",
+        "message_embedding_meta",
+    ):
+        assert required in names, f"missing table: {required}"
+
+
+def test_vec_sessions_virtual_table_present(store: MemoryStore) -> None:
     row = store.conn.execute(
-        "SELECT name FROM sqlite_master WHERE name='vec_episodes'"
+        "SELECT name FROM sqlite_master WHERE name='vec_sessions'"
     ).fetchone()
     assert row is not None
-    assert row["name"] == "vec_episodes"
 
 
-def test_vec0_insert_and_match_round_trip(store: MemoryStore) -> None:
-    store.conn.execute(
-        "INSERT INTO episodes (when_at, summary, primary_channel) VALUES (?, ?, ?)",
-        ("2026-04-30T00:00:00", "fixture", "text"),
-    )
-    eid = store.conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+def test_vec_messages_virtual_table_present(store: MemoryStore) -> None:
+    row = store.conn.execute(
+        "SELECT name FROM sqlite_master WHERE name='vec_messages'"
+    ).fetchone()
+    assert row is not None
 
+
+def test_vec_sessions_insert_and_match(store: MemoryStore) -> None:
+    sid = store.add_session(summary="fixture")
     vec = [0.1] * EMBED_DIM
     blob = struct.pack(f"{EMBED_DIM}f", *vec)
     store.conn.execute(
-        "INSERT INTO vec_episodes (episode_id, embedding) VALUES (?, ?)",
-        (eid, blob),
+        "INSERT INTO vec_sessions (session_id, embedding) VALUES (?, ?)",
+        (sid, blob),
     )
-
     rows = store.conn.execute(
-        "SELECT episode_id FROM vec_episodes "
-        "WHERE embedding MATCH ? ORDER BY distance LIMIT 1",
+        "SELECT session_id FROM vec_sessions WHERE embedding MATCH ? "
+        "ORDER BY distance LIMIT 1",
         (blob,),
     ).fetchall()
     assert len(rows) == 1
-    assert rows[0]["episode_id"] == eid
+    assert rows[0]["session_id"] == sid
 
 
-def test_episode_primary_channel_check_constraint(store: MemoryStore) -> None:
-    import sqlite3
-
-    try:
+def test_message_role_check_constraint(store: MemoryStore) -> None:
+    sid = store.add_session()
+    with pytest.raises(sqlite3.IntegrityError):
         store.conn.execute(
-            "INSERT INTO episodes (when_at, summary, primary_channel) VALUES (?, ?, ?)",
-            ("2026-04-30T00:00:00", "bad", "fax"),
+            "INSERT INTO messages (session_id, role, content) VALUES (?, 'ghost', 'x')",
+            (sid,),
         )
-    except sqlite3.IntegrityError:
-        return
-    raise AssertionError("CHECK constraint did not reject invalid primary_channel")

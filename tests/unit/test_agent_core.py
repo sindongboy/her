@@ -1,28 +1,22 @@
 """Unit tests for apps/agent/core.py — AgentCore orchestrator.
 
 All tests use:
-- in-memory SQLite store
-- fake GeminiClient (injected via `client` param) — no live API calls
+- in-memory SQLite store (per-test tmp file)
+- fake GeminiClient injected via `client=` — no live API calls
 """
 
 from __future__ import annotations
 
 from pathlib import Path
 from typing import Any
-from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from apps.agent import AgentCore, AgentResponse, AttachmentRef, RecallContext
+from apps.agent import AgentCore, AgentResponse, AttachmentRef
 from apps.memory.store import MemoryStore
 
 
-# ── helpers ───────────────────────────────────────────────────────────────
-
-
 class FakeGeminiClient:
-    """Test double for GeminiClient. Returns canned responses."""
-
     def __init__(self, response: str = "네, 알겠습니다.") -> None:
         self.response = response
         self.generate_calls: list[dict[str, Any]] = []
@@ -36,9 +30,7 @@ class FakeGeminiClient:
         system: str = "",
         parts: list[Any] | None = None,
     ) -> str:
-        self.generate_calls.append(
-            {"messages": messages, "system": system, "parts": parts}
-        )
+        self.generate_calls.append({"messages": messages, "system": system, "parts": parts})
         return self.response
 
     async def generate_stream(  # type: ignore[override]
@@ -76,7 +68,7 @@ def agent_with_anon(store: MemoryStore, fake_client: FakeGeminiClient) -> AgentC
     return AgentCore(store, client=fake_client, enable_anonymization=True)
 
 
-# ── basic respond() tests ─────────────────────────────────────────────────
+# ── basic respond() ──────────────────────────────────────────────────────
 
 
 class TestRespond:
@@ -94,23 +86,18 @@ class TestRespond:
         assert resp.text == "테스트 응답입니다."
 
     @pytest.mark.asyncio
-    async def test_episode_id_is_created(self, agent: AgentCore) -> None:
+    async def test_session_id_is_created(self, agent: AgentCore) -> None:
         resp = await agent.respond("안녕")
-        assert isinstance(resp.episode_id, int)
-        assert resp.episode_id > 0
+        assert isinstance(resp.session_id, int)
+        assert resp.session_id > 0
 
     @pytest.mark.asyncio
-    async def test_episode_id_reused_if_provided(
+    async def test_session_id_reused_if_provided(
         self, agent: AgentCore, store: MemoryStore
     ) -> None:
-        # Create an episode manually.
-        cur = store.conn.execute(
-            "INSERT INTO episodes (when_at, summary, primary_channel) "
-            "VALUES (CURRENT_TIMESTAMP, NULL, 'text')"
-        )
-        existing_id = int(cur.lastrowid or 0)
-        resp = await agent.respond("이어서 대화", episode_id=existing_id)
-        assert resp.episode_id == existing_id
+        existing_id = store.add_session()
+        resp = await agent.respond("이어서 대화", session_id=existing_id)
+        assert resp.session_id == existing_id
 
     @pytest.mark.asyncio
     async def test_used_fact_ids_is_list(self, agent: AgentCore) -> None:
@@ -118,9 +105,9 @@ class TestRespond:
         assert isinstance(resp.used_fact_ids, list)
 
     @pytest.mark.asyncio
-    async def test_used_episode_ids_is_list(self, agent: AgentCore) -> None:
+    async def test_used_session_ids_is_list(self, agent: AgentCore) -> None:
         resp = await agent.respond("안녕")
-        assert isinstance(resp.used_episode_ids, list)
+        assert isinstance(resp.used_session_ids, list)
 
     @pytest.mark.asyncio
     async def test_gemini_generate_called_once(
@@ -138,19 +125,26 @@ class TestRespond:
         assert "텍스트" in system or "마크다운" in system
 
     @pytest.mark.asyncio
-    async def test_episode_summary_updated(
+    async def test_session_summary_updated(
         self, agent: AgentCore, store: MemoryStore
     ) -> None:
         resp = await agent.respond("오늘 날씨 어때?")
-        row = store.conn.execute(
-            "SELECT summary FROM episodes WHERE id = ?", (resp.episode_id,)
-        ).fetchone()
-        assert row is not None
-        assert row["summary"] is not None
-        assert len(row["summary"]) > 0
+        s = store.get_session(resp.session_id)
+        assert s is not None
+        assert s.summary is not None
+        assert len(s.summary) > 0
+
+    @pytest.mark.asyncio
+    async def test_messages_persisted(
+        self, agent: AgentCore, store: MemoryStore
+    ) -> None:
+        resp = await agent.respond("안녕")
+        msgs = store.list_messages(resp.session_id)
+        roles = [m.role for m in msgs]
+        assert roles == ["user", "assistant"]
 
 
-# ── recall integration in respond() ──────────────────────────────────────
+# ── recall integration ────────────────────────────────────────────────────
 
 
 class TestRecallIntegration:
@@ -165,7 +159,6 @@ class TestRecallIntegration:
             (mom_id, "좋아하는 음식", "단호박 케이크", 0.9),
         )
         await agent.respond("어머니 좋아하는 음식 뭐야?")
-        # Check the message sent to Gemini includes memory context.
         content = fake_client.generate_calls[0]["messages"][0]["content"]
         assert "단호박 케이크" in content
 
@@ -182,8 +175,17 @@ class TestRecallIntegration:
         content = fake_client.generate_calls[0]["messages"][0]["content"]
         assert "어머니 생신" in content
 
+    @pytest.mark.asyncio
+    async def test_notes_included_in_recall(
+        self, agent: AgentCore, store: MemoryStore, fake_client: FakeGeminiClient
+    ) -> None:
+        store.add_note("매주 금요일 외식")
+        await agent.respond("외식 계획")
+        content = fake_client.generate_calls[0]["messages"][0]["content"]
+        assert "외식" in content
 
-# ── anonymization boundary tests ──────────────────────────────────────────
+
+# ── anonymization ────────────────────────────────────────────────────────
 
 
 class TestAnonymization:
@@ -197,7 +199,6 @@ class TestAnonymization:
         store.add_person("아내", relation="spouse")
         await agent_with_anon.respond("아내가 오늘 뭘 좋아하지?")
         content = fake_client.generate_calls[0]["messages"][0]["content"]
-        # Real name must not reach LLM.
         assert "아내" not in content
 
     @pytest.mark.asyncio
@@ -210,7 +211,7 @@ class TestAnonymization:
         assert "아내" in content
 
 
-# ── stream_respond() tests ─────────────────────────────────────────────────
+# ── stream_respond() ─────────────────────────────────────────────────────
 
 
 class TestStreamRespond:
@@ -225,14 +226,12 @@ class TestStreamRespond:
         assert chunks == ["안녕", "하세요", "!"]
 
     @pytest.mark.asyncio
-    async def test_episode_created_after_stream(
+    async def test_session_created_after_stream(
         self, agent: AgentCore, store: MemoryStore
     ) -> None:
-        episode_id: int | None = None
         async for _ in agent.stream_respond("스트리밍 테스트"):
             pass
-        # An episode row should have been created.
-        row = store.conn.execute("SELECT id FROM episodes LIMIT 1").fetchone()
+        row = store.conn.execute("SELECT id FROM sessions LIMIT 1").fetchone()
         assert row is not None
 
     @pytest.mark.asyncio
@@ -240,32 +239,26 @@ class TestStreamRespond:
         self, agent: AgentCore, store: MemoryStore, fake_client: FakeGeminiClient
     ) -> None:
         fake_client.stream_chunks = ["안녕", "하세요"]
-        ep_id: int | None = None
         async for _ in agent.stream_respond("스트리밍 질문"):
             pass
         row = store.conn.execute(
-            "SELECT id, summary FROM episodes ORDER BY id DESC LIMIT 1"
+            "SELECT id, summary FROM sessions ORDER BY id DESC LIMIT 1"
         ).fetchone()
         assert row is not None
         assert row["summary"] is not None
 
     @pytest.mark.asyncio
-    async def test_stream_episode_id_reused(
+    async def test_stream_session_id_reused(
         self, agent: AgentCore, store: MemoryStore
     ) -> None:
-        cur = store.conn.execute(
-            "INSERT INTO episodes (when_at, summary, primary_channel) "
-            "VALUES (CURRENT_TIMESTAMP, NULL, 'text')"
-        )
-        existing_id = int(cur.lastrowid or 0)
-        async for _ in agent.stream_respond("이어서", episode_id=existing_id):
+        existing_id = store.add_session()
+        async for _ in agent.stream_respond("이어서", session_id=existing_id):
             pass
-        # Should not create a new episode.
-        count = store.conn.execute("SELECT COUNT(*) FROM episodes").fetchone()[0]
+        count = store.conn.execute("SELECT COUNT(*) FROM sessions").fetchone()[0]
         assert count == 1
 
 
-# ── edge cases ────────────────────────────────────────────────────────────
+# ── edge cases ───────────────────────────────────────────────────────────
 
 
 class TestEdgeCases:
@@ -273,7 +266,7 @@ class TestEdgeCases:
     async def test_empty_message(self, agent: AgentCore) -> None:
         resp = await agent.respond("")
         assert isinstance(resp, AgentResponse)
-        assert resp.episode_id > 0
+        assert resp.session_id > 0
 
     @pytest.mark.asyncio
     async def test_long_summary_truncated(
@@ -281,39 +274,23 @@ class TestEdgeCases:
     ) -> None:
         fake_client.response = "x" * 500
         resp = await agent.respond("y" * 200)
-        row = store.conn.execute(
-            "SELECT summary FROM episodes WHERE id = ?", (resp.episode_id,)
-        ).fetchone()
-        assert len(row["summary"]) <= 200
+        s = store.get_session(resp.session_id)
+        assert s is not None
+        assert s.summary is not None
+        assert len(s.summary) <= 200
 
 
-# ── multimodal / attachments tests ───────────────────────────────────────
-
-
-class FakeGeminiClientCaptureParts(FakeGeminiClient):
-    """Extended fake that also records the parts= argument."""
-
-    def generate(
-        self,
-        messages: list[dict[str, Any]],
-        *,
-        system: str = "",
-        parts: list[Any] | None = None,
-    ) -> str:
-        self.generate_calls.append(
-            {"messages": messages, "system": system, "parts": parts}
-        )
-        return self.response
+# ── multimodal ───────────────────────────────────────────────────────────
 
 
 class TestMultimodalAttachments:
     @pytest.fixture()
-    def capturing_client(self) -> FakeGeminiClientCaptureParts:
-        return FakeGeminiClientCaptureParts()
+    def capturing_client(self) -> FakeGeminiClient:
+        return FakeGeminiClient()
 
     @pytest.fixture()
     def agent_capture(
-        self, store: MemoryStore, capturing_client: FakeGeminiClientCaptureParts
+        self, store: MemoryStore, capturing_client: FakeGeminiClient
     ) -> AgentCore:
         return AgentCore(store, client=capturing_client, enable_anonymization=False)
 
@@ -321,33 +298,30 @@ class TestMultimodalAttachments:
     async def test_respond_without_attachments_passes_empty_parts(
         self,
         agent_capture: AgentCore,
-        capturing_client: FakeGeminiClientCaptureParts,
+        capturing_client: FakeGeminiClient,
     ) -> None:
         await agent_capture.respond("안녕")
         call = capturing_client.generate_calls[0]
-        # parts should be None or empty list when no attachments given.
         assert call["parts"] is None or call["parts"] == []
 
     @pytest.mark.asyncio
     async def test_respond_with_txt_attachment_passes_parts(
         self,
         agent_capture: AgentCore,
-        capturing_client: FakeGeminiClientCaptureParts,
+        capturing_client: FakeGeminiClient,
         tmp_path: Path,
     ) -> None:
         txt = tmp_path / "note.txt"
         txt.write_text("테스트 노트 내용", encoding="utf-8")
         ref = AttachmentRef(path=txt, mime="text/plain")
         await agent_capture.respond("이 파일 봐줘", attachments=[ref])
-
         call = capturing_client.generate_calls[0]
         assert call["parts"] is not None
         assert len(call["parts"]) == 1
 
     @pytest.mark.asyncio
     async def test_agent_response_has_used_attachment_ids_field(
-        self,
-        agent_capture: AgentCore,
+        self, agent_capture: AgentCore
     ) -> None:
         resp = await agent_capture.respond("안녕")
         assert hasattr(resp, "used_attachment_ids")
@@ -355,23 +329,18 @@ class TestMultimodalAttachments:
 
     @pytest.mark.asyncio
     async def test_used_attachment_ids_populated_from_recall(
-        self,
-        agent_capture: AgentCore,
-        store: MemoryStore,
+        self, agent_capture: AgentCore, store: MemoryStore
     ) -> None:
-        # Create an episode and add an attachment to it.
-        ep_id = store.add_episode(primary_channel="text")
+        sid = store.add_session()
         store.add_attachment(
-            ep_id,
+            sid,
             sha256="a" * 64,
             path="/tmp/fake.txt",
             mime="text/plain",
             ext=".txt",
             byte_size=10,
         )
-        resp = await agent_capture.respond("파일 있어?", episode_id=ep_id)
-        # Recall strategy 4 should surface the attachment ID.
-        assert resp.episode_id == ep_id
+        resp = await agent_capture.respond("파일 있어?", session_id=sid)
+        assert resp.session_id == sid
         assert isinstance(resp.used_attachment_ids, list)
-        # The attachment for ep_id should be recalled.
         assert len(resp.used_attachment_ids) >= 1

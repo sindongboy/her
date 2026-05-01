@@ -29,7 +29,7 @@ from apps.presence import Event, EventBus
 
 log = structlog.get_logger(__name__)
 
-# Max memory_recall events emitted per call (facts + episodes + attachments).
+# Max memory_recall events emitted per call (facts + sessions + notes + attachments).
 _MAX_RECALL_EVENTS_EACH = 3
 
 
@@ -49,7 +49,7 @@ def _publish(bus: EventBus | None, event: Event) -> None:
     except Exception as exc:  # pragma: no cover
         log.warning("publish_failed", error=str(exc))
 
-# Max summary length stored in episodes.summary per turn.
+# Max summary length stored in sessions.summary per turn.
 _SUMMARY_MAX_CHARS = 200
 
 _SYSTEM_BASE = """당신은 따뜻하고 가까운 가족 같은 AI 비서입니다.
@@ -75,9 +75,10 @@ class AttachmentRef:
 @dataclass(slots=True, frozen=True)
 class AgentResponse:
     text: str
-    episode_id: int
-    used_episode_ids: list[int]
+    session_id: int
+    used_session_ids: list[int]
     used_fact_ids: list[int]
+    used_note_ids: list[int] = field(default_factory=list)
     used_attachment_ids: list[int] = field(default_factory=list)
 
 
@@ -142,28 +143,24 @@ class AgentCore:
         self,
         message: str,
         *,
-        episode_id: int | None = None,
+        session_id: int | None = None,
         attachments: list[AttachmentRef] | None = None,
     ) -> AgentResponse:
         """Full response cycle: recall → LLM → persist → return."""
-        ep_id = await self._ensure_episode(episode_id)
+        sid = await self._ensure_session(session_id)
         log.info(
             "agent.respond.start",
-            episode_id=ep_id,
+            session_id=sid,
             attachment_count=len(attachments) if attachments else 0,
         )
 
-        ctx = await recall(self.store, message, self._gemini, episode_id=ep_id)
+        ctx = await recall(self.store, message, self._gemini, session_id=sid)
 
         system_prompt = _build_system_prompt()
         messages, alias_map = self._build_messages(message, ctx)
 
-        # Build multimodal parts from attachments (binary / text files).
         extra_parts = parts_from_attachment_refs(attachments) if attachments else []
 
-        # generate() is network-bound; run in thread so event loop stays responsive.
-        # _persist_turn writes to SQLite via the same conn — must NOT run in a
-        # worker thread (SQLite single-thread constraint). Run it inline instead.
         text = await asyncio.to_thread(
             self._generate_sync,
             messages,
@@ -175,24 +172,26 @@ class AgentCore:
             anonymizer = Anonymizer(self.store.list_people())
             text = anonymizer.restore(text, alias_map)
 
-        self._persist_turn(ep_id, message, text)
+        self._persist_turn(sid, message, text)
 
-        used_episode_ids = [e[0] for e in ctx.episodes]
+        used_session_ids = [s[0] for s in ctx.sessions]
         used_fact_ids = [f[0] for f in ctx.facts]
+        used_note_ids = [n[0] for n in ctx.notes]
         used_attachment_ids = list(ctx.attachment_ids) if ctx.attachment_ids else []
 
         log.info(
             "agent.respond.done",
-            episode_id=ep_id,
+            session_id=sid,
             response_chars=len(text),
-            recalled_episodes=len(used_episode_ids),
+            recalled_sessions=len(used_session_ids),
             attachment_parts=len(extra_parts),
         )
         return AgentResponse(
             text=text,
-            episode_id=ep_id,
-            used_episode_ids=used_episode_ids,
+            session_id=sid,
+            used_session_ids=used_session_ids,
             used_fact_ids=used_fact_ids,
+            used_note_ids=used_note_ids,
             used_attachment_ids=used_attachment_ids,
         )
 
@@ -200,20 +199,19 @@ class AgentCore:
         self,
         message: str,
         *,
-        episode_id: int | None = None,
+        session_id: int | None = None,
         attachments: list[AttachmentRef] | None = None,
     ) -> AsyncIterator[str]:
         """Streaming response. Yields chunks; persists assembled text at end."""
-        ep_id = await self._ensure_episode(episode_id)
+        sid = await self._ensure_session(session_id)
         log.info(
             "agent.stream.start",
-            episode_id=ep_id,
+            session_id=sid,
             attachment_count=len(attachments) if attachments else 0,
         )
 
-        ctx = await recall(self.store, message, self._gemini, episode_id=ep_id)
+        ctx = await recall(self.store, message, self._gemini, session_id=sid)
 
-        # Emit memory_recall events (top-3 each kind for the ambient UI signal).
         self._publish_recall_events(ctx)
 
         system_prompt = _build_system_prompt()
@@ -254,12 +252,11 @@ class AgentCore:
             raise
 
         full_text = "".join(accumulated)
-        # SQLite must stay on the originating thread — call inline.
-        self._persist_turn(ep_id, message, full_text)
+        self._persist_turn(sid, message, full_text)
 
         log.info(
             "agent.stream.done",
-            episode_id=ep_id,
+            session_id=sid,
             response_chars=len(full_text),
         )
 
@@ -313,30 +310,15 @@ class AgentCore:
             async for chunk in gen(messages, system=system, parts=parts):
                 yield chunk
 
-    async def _ensure_episode(self, episode_id: int | None) -> int:
-        """Return existing episode_id or create a new episode row.
+    async def _ensure_session(self, session_id: int | None) -> int:
+        """Return existing session_id or create a new session row.
 
         SQLite connections are single-threaded; we call store.conn directly
         on the event loop thread rather than via asyncio.to_thread.
         """
-        if episode_id is not None:
-            return episode_id
-        return self._create_episode()
-
-    def _create_episode(self) -> int:
-        """Insert a new episode row and return its id (synchronous)."""
-        add_episode = getattr(self.store, "add_episode", None)
-        if callable(add_episode):
-            try:
-                return int(add_episode(primary_channel="text"))
-            except TypeError:
-                pass
-
-        cur = self.store.conn.execute(
-            "INSERT INTO episodes (when_at, summary, primary_channel) "
-            "VALUES (CURRENT_TIMESTAMP, NULL, 'text')",
-        )
-        return int(cur.lastrowid or 0)
+        if session_id is not None:
+            return session_id
+        return self.store.add_session()
 
     def _build_messages(
         self,
@@ -363,23 +345,18 @@ class AgentCore:
 
         return [{"role": "user", "content": final_content}], alias_map
 
-    def _persist_turn(self, episode_id: int, user_msg: str, assistant_msg: str) -> None:
-        """Update episode summary with a truncated exchange snapshot."""
+    def _persist_turn(self, session_id: int, user_msg: str, assistant_msg: str) -> None:
+        """Append user + assistant rows to messages, refresh session summary."""
+        self.store.add_message(session_id, "user", user_msg)
+        self.store.add_message(session_id, "assistant", assistant_msg)
+
         snippet = f"U: {user_msg[:80]} | A: {assistant_msg[:80]}"
         snippet = snippet[:_SUMMARY_MAX_CHARS]
-        self.store.conn.execute(
-            "UPDATE episodes SET summary = ? WHERE id = ?",
-            (snippet, episode_id),
-        )
-        log.debug("agent.persist", episode_id=episode_id)
+        self.store.set_session_summary(session_id, snippet)
+        log.debug("agent.persist", session_id=session_id)
 
     def _publish_recall_events(self, ctx: RecallContext) -> None:
-        """Emit memory_recall events for the top-3 of each recalled kind.
-
-        These drive optional ambient pulses on the orb — not critical-path.
-        Capped to avoid spamming the bus on large recall results.
-        """
-        # Facts: (fact_id, person_name, predicate, object)
+        """Emit memory_recall events for the top-3 of each recalled kind."""
         for _, person_name, _pred, _obj in ctx.facts[:_MAX_RECALL_EVENTS_EACH]:
             _publish(
                 self._bus,
@@ -389,17 +366,24 @@ class AgentCore:
                     ts=time.monotonic(),
                 ),
             )
-        # Episodes: (episode_id, summary, score)
-        for _ep_id, _summary, _score in ctx.episodes[:_MAX_RECALL_EVENTS_EACH]:
+        for _sid, _text, _score in ctx.sessions[:_MAX_RECALL_EVENTS_EACH]:
             _publish(
                 self._bus,
                 Event(
                     type="memory_recall",
-                    payload={"kind": "episode", "person_name": None},
+                    payload={"kind": "session", "person_name": None},
                     ts=time.monotonic(),
                 ),
             )
-        # Attachments: (attachment_id, path, description)
+        for _nid, _content in ctx.notes[:_MAX_RECALL_EVENTS_EACH]:
+            _publish(
+                self._bus,
+                Event(
+                    type="memory_recall",
+                    payload={"kind": "note", "person_name": None},
+                    ts=time.monotonic(),
+                ),
+            )
         for _att_id, _path, _desc in ctx.attachments[:_MAX_RECALL_EVENTS_EACH]:
             _publish(
                 self._bus,
@@ -476,9 +460,16 @@ def _format_recall_context(ctx: RecallContext) -> str:
         lines = [f"- {title} ({when})" for _, title, when in ctx.upcoming_events]
         parts.append("예정 이벤트 (Upcoming Events):\n" + "\n".join(lines))
 
-    if ctx.episodes:
-        lines = [f"- [{score:.2f}] {summary}" for _, summary, score in ctx.episodes if summary]
+    if ctx.notes:
+        lines = [f"- {content}" for _, content in ctx.notes if content]
         if lines:
-            parts.append("관련 대화 (Related Episodes):\n" + "\n".join(lines))
+            parts.append("메모 (Notes):\n" + "\n".join(lines))
+
+    if ctx.sessions:
+        lines = [
+            f"- [{score:.2f}] {text}" for _, text, score in ctx.sessions if text
+        ]
+        if lines:
+            parts.append("관련 대화 (Related Sessions):\n" + "\n".join(lines))
 
     return "\n\n".join(parts)

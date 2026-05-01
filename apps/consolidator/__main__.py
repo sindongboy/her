@@ -96,17 +96,17 @@ async def _main() -> None:
             dry_run=dry_run,
         )
 
-        # Summary in Korean for the user
         print()
         print("=" * 50)
         print("통합 완료")
         print("=" * 50)
         print(f"  실행 시각  : {report.ran_at}")
-        print(f"  에피소드   : {report.episodes_processed}개 처리")
+        print(f"  세션       : {report.sessions_processed}개 처리")
         print(f"  사실 추출  : {report.facts_extracted}개 (LLM 후보)")
         print(f"  사실 승격  : {report.facts_promoted}개 (신뢰도 ≥ 0.7)")
         print(f"  사실 아카이브: {report.facts_archived}개 (이전 충돌 사실)")
         print(f"  일정 추가  : {report.events_added}개")
+        print(f"  메모 추가  : {report.notes_added}개")
         if report.errors:
             print(f"  오류       : {len(report.errors)}건")
             for err in report.errors:

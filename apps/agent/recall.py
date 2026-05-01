@@ -1,22 +1,17 @@
-"""Memory recall — §5.4 three-strategy parallel retrieval.
+"""Memory recall — sessions/notes/facts/events strategies.
 
-Raw SQL by design — see CLAUDE.md §4 module boundaries.
-AgentCore must not depend on typed memory-eng methods that may be added
-concurrently; instead we hit store.conn directly so this module stays
-decoupled from memory-eng's delivery schedule.
+Raw SQL by design — see CLAUDE.md §4 module boundaries. Recall directly
+hits store.conn so this module stays decoupled from MemoryStore method
+ordering.
 
 Strategy summary:
 1. Structured  — keyword match → SQL facts + upcoming events per person.
-2. Semantic    — embed the message, cosine-search vec_episodes (network I/O
-                 runs in asyncio.to_thread), apply recency boost ×1.5 for
-                 episodes within 7 days.
-3. Recency fallback — most-recent 5 episodes when semantic returns nothing
-                 (empty index or embedding unavailable).
-
-Trade-off: SQLite has a single connection (single-threaded). Strategies 1 & 3
-are pure SQL (fast); strategy 2 has an external API call (network-bound).
-We run the SQL strategies inline and wrap only the embed call in to_thread so
-the event loop doesn't block.
+2. Semantic    — embed the message, KNN-search vec_messages → join up to
+                 sessions; recency boost for sessions whose last_active_at
+                 is within 7 days.
+3. Recency fallback — most-recent 5 sessions when semantic returns nothing.
+4. Notes       — keyword LIKE match against active notes.
+5. Recent attachments — last N attachments for the active session.
 """
 
 from __future__ import annotations
@@ -35,30 +30,30 @@ if TYPE_CHECKING:
 
 log = structlog.get_logger(__name__)
 
-# Recency boost: episodes within this window get score multiplied.
 _RECENCY_DAYS = 7
 _RECENCY_BOOST = 1.5
 
-# Max results per strategy.
 _STRUCTURED_FACTS_LIMIT = 10
 _STRUCTURED_EVENTS_LIMIT = 5
 _SEMANTIC_CANDIDATES = 20
 _SEMANTIC_TOP_K = 5
 _RECENCY_FALLBACK_K = 5
+_NOTES_LIMIT = 5
 
 
 @dataclass(slots=True, frozen=True)
 class RecallContext:
-    episodes: list[tuple[int, str, float]] = field(default_factory=list)
-    # (episode_id, summary, score)
+    sessions: list[tuple[int, str, float]] = field(default_factory=list)
+    # (session_id, summary_or_title, score)
     facts: list[tuple[int, str, str, str]] = field(default_factory=list)
     # (fact_id, person_name, predicate, object)
     upcoming_events: list[tuple[int, str, str]] = field(default_factory=list)
     # (event_id, title, when_at)
+    notes: list[tuple[int, str]] = field(default_factory=list)
+    # (note_id, content)
     attachments: list[tuple[int, str, str]] = field(default_factory=list)
-    # (attachment_id, path, description) — only populated when episode_id given
+    # (attachment_id, path, description)
     attachment_ids: list[int] = field(default_factory=list)
-    # flat list of attachment IDs for AgentResponse.used_attachment_ids
 
 
 async def recall(
@@ -66,63 +61,48 @@ async def recall(
     message: str,
     gemini_client: "GeminiClient",
     *,
-    episode_id: int | None = None,
+    session_id: int | None = None,
 ) -> RecallContext:
-    """Run recall strategies and merge into a RecallContext.
+    """Run recall strategies and merge into a RecallContext."""
+    log.debug("recall.start", msg_len=len(message), session_id=session_id)
 
-    Strategies:
-    1. Structured  — keyword match → SQL facts + upcoming events per person.
-    2. Semantic    — embed the message, cosine-search vec_episodes.
-    3. Recency fallback — most-recent 5 episodes when semantic returns nothing.
-    4. Recent attachments — last N attachments for the current episode (only
-                            when episode_id is explicitly provided).
-
-    Trade-off note: SQLite uses a single connection created on the event-loop
-    thread; we must NOT call store.conn from worker threads. Therefore:
-    - Strategies 1, 3, 4 (pure SQL) run inline on the event-loop thread.
-    - Strategy 2 splits the work: the embed() network call runs in
-      asyncio.to_thread, then the SQLite KNN query runs inline.
-    """
-    log.debug("recall.start", msg_len=len(message), episode_id=episode_id)
-
-    # Strategy 1: pure SQL — run inline.
     structured_facts, structured_events = _structured_recall(store, message)
 
-    # Strategy 2: embed is network-bound → run in thread.
-    # SQLite KNN search runs inline afterward (same thread as conn).
-    episodes: list[tuple[int, str, float]] = []
+    sessions: list[tuple[int, str, float]] = []
     try:
         def _do_embed() -> list[float]:
             return gemini_client.embed(message, task_type="RETRIEVAL_QUERY")
 
         query_vec = await asyncio.to_thread(_do_embed)
-        episodes = _semantic_search(store, query_vec)
+        sessions = _semantic_search(store, query_vec)
     except Exception as exc:
         log.warning("recall.semantic_failed", error=str(exc))
-        episodes = []
+        sessions = []
 
-    # Strategy 3 fallback if semantic returns nothing.
-    if not episodes:
-        episodes = _recency_fallback(store)
+    if not sessions:
+        sessions = _recency_fallback(store)
 
-    # Strategy 4: recent attachments — only when continuing an episode.
+    notes = _notes_recall(store, message)
+
     attachment_tuples: list[tuple[int, str, str]] = []
-    if episode_id is not None:
-        attachment_tuples = _recent_attachments_for_episode(store, episode_id)
+    if session_id is not None:
+        attachment_tuples = _recent_attachments_for_session(store, session_id)
 
     attachment_ids = [a[0] for a in attachment_tuples]
 
     log.debug(
         "recall.done",
-        episodes=len(episodes),
+        sessions=len(sessions),
         facts=len(structured_facts),
         events=len(structured_events),
+        notes=len(notes),
         attachments=len(attachment_tuples),
     )
     return RecallContext(
-        episodes=episodes,
+        sessions=sessions,
         facts=structured_facts,
         upcoming_events=structured_events,
+        notes=notes,
         attachments=attachment_tuples,
         attachment_ids=attachment_ids,
     )
@@ -135,7 +115,6 @@ def _structured_recall(
     store: "MemoryStore",
     message: str,
 ) -> tuple[list[tuple[int, str, str, str]], list[tuple[int, str, str]]]:
-    """Match person names in message; pull facts + upcoming events via SQL."""
     people = store.list_people()
     matched_ids: list[int] = [p.id for p in people if p.name and p.name in message]
     if not matched_ids:
@@ -145,7 +124,6 @@ def _structured_recall(
     events: list[tuple[int, str, str]] = []
 
     for pid in matched_ids:
-        # Lookup person name for the fact tuple.
         person_row = store.conn.execute(
             "SELECT name FROM people WHERE id = ?", (pid,)
         ).fetchone()
@@ -153,7 +131,6 @@ def _structured_recall(
             continue
         person_name: str = person_row["name"]
 
-        # Active facts for this person.
         fact_rows = store.conn.execute(
             """
             SELECT id, predicate, object
@@ -168,7 +145,6 @@ def _structured_recall(
         for row in fact_rows:
             facts.append((row["id"], person_name, row["predicate"], row["object"]))
 
-        # Upcoming events for this person.
         event_rows = store.conn.execute(
             """
             SELECT id, title, when_at
@@ -194,26 +170,24 @@ def _semantic_search(
     store: "MemoryStore",
     query_vec: list[float],
 ) -> list[tuple[int, str, float]]:
-    """Search vec_episodes with a pre-computed query vector, apply recency boost.
-
-    Runs on the event-loop thread (same thread as SQLite conn creation).
-    The embed() call that produced query_vec runs in asyncio.to_thread —
-    see recall() above for the split.
-    """
+    """KNN-search vec_messages and surface the parent session, with recency boost."""
     vec_bytes = _floats_to_bytes(query_vec)
 
-    # sqlite-vec KNN query.
     rows = store.conn.execute(
         """
-        SELECT ve.episode_id,
-               e.summary,
-               e.when_at,
-               ve.distance
-        FROM   vec_episodes ve
-        JOIN   episodes e ON e.id = ve.episode_id
-        WHERE  ve.embedding MATCH ?
+        SELECT vm.message_id,
+               m.session_id,
+               m.content,
+               s.summary,
+               s.title,
+               s.last_active_at,
+               vm.distance
+        FROM   vec_messages vm
+        JOIN   messages m ON m.id = vm.message_id
+        JOIN   sessions s ON s.id = m.session_id
+        WHERE  vm.embedding MATCH ?
           AND  k = ?
-        ORDER  BY ve.distance
+        ORDER  BY vm.distance
         """,
         (vec_bytes, _SEMANTIC_CANDIDATES),
     ).fetchall()
@@ -222,26 +196,29 @@ def _semantic_search(
         return []
 
     cutoff = datetime.now(tz=timezone.utc) - timedelta(days=_RECENCY_DAYS)
-    results: list[tuple[int, str, float]] = []
+    by_session: dict[int, tuple[str, float]] = {}
 
     for row in rows:
+        session_id = int(row["session_id"])
         distance: float = float(row["distance"])
-        # Convert distance to a pseudo-score (lower distance = higher score).
         score = 1.0 / (1.0 + distance)
 
-        when_str: str | None = row["when_at"]
-        if when_str:
+        last_active_str: str | None = row["last_active_at"]
+        if last_active_str:
             try:
-                when_dt = datetime.fromisoformat(when_str).replace(tzinfo=timezone.utc)
-                if when_dt >= cutoff:
+                ts = datetime.fromisoformat(last_active_str).replace(tzinfo=timezone.utc)
+                if ts >= cutoff:
                     score *= _RECENCY_BOOST
             except ValueError:
                 pass
 
-        summary: str = row["summary"] or ""
-        results.append((int(row["episode_id"]), summary, round(score, 4)))
+        # Prefer session summary > session title > matching message snippet.
+        text = row["summary"] or row["title"] or (row["content"] or "")[:120]
+        prev = by_session.get(session_id)
+        if prev is None or score > prev[1]:
+            by_session[session_id] = (text, round(score, 4))
 
-    # Sort by score descending, take top K.
+    results = [(sid, text, score) for sid, (text, score) in by_session.items()]
     results.sort(key=lambda x: x[2], reverse=True)
     return results[:_SEMANTIC_TOP_K]
 
@@ -250,45 +227,62 @@ def _semantic_search(
 
 
 def _recency_fallback(store: "MemoryStore") -> list[tuple[int, str, float]]:
-    """Return the 5 most-recent episodes by when_at."""
     rows = store.conn.execute(
         """
-        SELECT id, summary, when_at
-        FROM   episodes
-        ORDER  BY when_at DESC
+        SELECT id, summary, title
+        FROM   sessions
+        WHERE  archived_at IS NULL
+        ORDER  BY last_active_at DESC
         LIMIT  ?
         """,
         (_RECENCY_FALLBACK_K,),
     ).fetchall()
     return [
-        (int(row["id"]), row["summary"] or "", 1.0)
+        (int(row["id"]), row["summary"] or row["title"] or "", 1.0)
         for row in rows
     ]
 
 
-# ── Strategy 4: Recent attachments for episode ────────────────────────────
+# ── Strategy 4: Notes ─────────────────────────────────────────────────────
 
 
-def _recent_attachments_for_episode(
+def _notes_recall(store: "MemoryStore", message: str) -> list[tuple[int, str]]:
+    """Naïve LIKE search against active notes — embeddings come in a later PR."""
+    text = message.strip()
+    if len(text) < 2:
+        return []
+    pattern = f"%{text[:80]}%"
+    rows = store.conn.execute(
+        """
+        SELECT id, content
+        FROM   notes
+        WHERE  archived_at IS NULL
+          AND  content LIKE ?
+        ORDER  BY updated_at DESC
+        LIMIT  ?
+        """,
+        (pattern, _NOTES_LIMIT),
+    ).fetchall()
+    return [(int(row["id"]), row["content"] or "") for row in rows]
+
+
+# ── Strategy 5: Recent attachments for session ────────────────────────────
+
+
+def _recent_attachments_for_session(
     store: "MemoryStore",
-    episode_id: int,
+    session_id: int,
     limit: int = 3,
 ) -> list[tuple[int, str, str]]:
-    """Return the most-recent attachments for a given episode.
-
-    Returns a list of (attachment_id, path, description) tuples.
-    Only included when episode_id is explicitly provided — new episodes
-    with no prior context return [].
-    """
     rows = store.conn.execute(
         """
         SELECT id, path, description
         FROM   attachments
-        WHERE  episode_id = ?
+        WHERE  session_id = ?
         ORDER  BY id DESC
         LIMIT  ?
         """,
-        (episode_id, limit),
+        (session_id, limit),
     ).fetchall()
     return [
         (int(row["id"]), row["path"] or "", row["description"] or "")
@@ -300,5 +294,4 @@ def _recent_attachments_for_episode(
 
 
 def _floats_to_bytes(values: list[float]) -> bytes:
-    """Pack float list to little-endian f32 bytes for sqlite-vec."""
     return struct.pack(f"{len(values)}f", *values)

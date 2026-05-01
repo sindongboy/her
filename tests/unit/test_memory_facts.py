@@ -19,13 +19,13 @@ def test_add_and_list_active_facts(store: MemoryStore) -> None:
     assert facts[0].archived_at is None
 
 
-def test_add_fact_with_source_episode(store: MemoryStore) -> None:
+def test_add_fact_with_source_session(store: MemoryStore) -> None:
     pid = store.add_person("Bob")
-    epid = store.add_episode("conversation", primary_channel="text")
-    fid = store.add_fact(pid, "prefers", "tea", confidence=0.8, source_episode_id=epid)
+    sid = store.add_session(title="conversation")
+    fid = store.add_fact(pid, "prefers", "tea", confidence=0.8, source_session_id=sid)
     facts = store.list_active_facts(pid)
     assert len(facts) == 1
-    assert facts[0].source_episode_id == epid
+    assert facts[0].source_session_id == sid
 
 
 def test_archive_fact_removes_from_active(store: MemoryStore) -> None:

@@ -268,3 +268,44 @@ def test_event_with_recurrence(store: MemoryStore) -> None:
     e = store.get_event(event_id)
     assert e is not None
     assert e.recurrence == "FREQ=WEEKLY"
+
+
+# ── promote_note ─────────────────────────────────────────────────────────
+
+
+from apps.consolidator.extractor import ExtractedNote
+from apps.consolidator.promoter import promote_note
+
+
+def test_promote_note_added(store: MemoryStore) -> None:
+    note = ExtractedNote(content="매주 금요일 외식하기", tags=["routine"])
+    nid = promote_note(store, note)
+    assert nid is not None
+    notes = store.list_notes()
+    assert len(notes) == 1
+    assert notes[0].content == "매주 금요일 외식하기"
+    assert notes[0].tags == ["routine"]
+
+
+def test_promote_note_with_source_session(store: MemoryStore) -> None:
+    sid = store.add_session()
+    note = ExtractedNote(content="결정사항", tags=[])
+    nid = promote_note(store, note, source_session_id=sid)
+    assert nid is not None
+    notes = store.list_notes()
+    assert notes[0].source_session_id == sid
+
+
+def test_promote_note_skips_empty_content(store: MemoryStore) -> None:
+    note = ExtractedNote(content="   ", tags=["tag"])
+    assert promote_note(store, note) is None
+    assert store.list_notes() == []
+
+
+def test_promote_note_dedup_same_content(store: MemoryStore) -> None:
+    note = ExtractedNote(content="같은 내용", tags=[])
+    nid1 = promote_note(store, note)
+    nid2 = promote_note(store, note)
+    assert nid1 is not None
+    assert nid2 is None
+    assert len(store.list_notes()) == 1

@@ -1,11 +1,10 @@
-"""Memory layer: SQLite + sqlite-vec store.
+"""Memory layer: SQLite + sqlite-vec store (schema v2).
 
-Phase 0 scope: boots the schema and exposes People CRUD. Episodes, events,
-facts, attachments, and embedding search are implemented as the agent path
-needs them.
+Schema v2 — sessions/messages/notes replace v1's episodes-only model.
+On boot, an existing v1 file is auto-backed-up and a v2 file is created.
 
 Per CLAUDE.md §2.3, this layer always operates on real names. Anonymization
-is the Agent Core LLM-adapter's responsibility, not this layer's.
+is the Agent Core LLM-adapter's responsibility.
 """
 
 from __future__ import annotations
@@ -13,6 +12,7 @@ from __future__ import annotations
 import json
 import sqlite3
 import struct
+import sys
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -20,13 +20,17 @@ from pathlib import Path
 from typing import Any, Iterator
 
 import sqlite_vec
+import structlog
+
+log = structlog.get_logger(__name__)
 
 SCHEMA_PATH = Path(__file__).parent / "schema.sql"
+SCHEMA_VERSION = 2
 
 EMBED_MODEL_ID = "gemini-embedding-001"
 EMBED_DIM = 768
 
-_VALID_CHANNELS = {"voice", "text", "mixed"}
+_VALID_ROLES = {"user", "assistant", "system"}
 _VALID_STATUSES = {"pending", "done", "cancelled"}
 
 
@@ -42,11 +46,22 @@ class Person:
 
 
 @dataclass(slots=True, frozen=True)
-class Episode:
+class Session:
     id: int
-    when_at: str
+    started_at: str
+    last_active_at: str
+    title: str | None
     summary: str | None
-    primary_channel: str  # 'voice' | 'text' | 'mixed'
+    archived_at: str | None
+
+
+@dataclass(slots=True, frozen=True)
+class Message:
+    id: int
+    session_id: int
+    role: str
+    content: str
+    ts: str
 
 
 @dataclass(slots=True, frozen=True)
@@ -58,7 +73,7 @@ class Event:
     when_at: str
     recurrence: str | None
     source: str | None
-    status: str  # 'pending' | 'done' | 'cancelled'
+    status: str
 
 
 @dataclass(slots=True, frozen=True)
@@ -68,23 +83,34 @@ class Fact:
     predicate: str
     object: str
     confidence: float
-    source_episode_id: int | None
+    source_session_id: int | None
     valid_from: str
     archived_at: str | None
 
 
 @dataclass(slots=True, frozen=True)
 class Preference:
-    person_id: int
+    person_id: int | None
     domain: str
     value: str
     last_seen_at: str
 
 
 @dataclass(slots=True, frozen=True)
+class Note:
+    id: int
+    content: str
+    tags: list[str]
+    source_session_id: int | None
+    created_at: str
+    updated_at: str
+    archived_at: str | None
+
+
+@dataclass(slots=True, frozen=True)
 class Attachment:
     id: int
-    episode_id: int
+    session_id: int
     sha256: str
     mime: str | None
     ext: str | None
@@ -95,33 +121,81 @@ class Attachment:
 
 
 @dataclass(slots=True, frozen=True)
-class EpisodeMatch:
-    episode: Episode
-    score: float   # final score after recency weight
-    distance: float  # raw vec0 distance
+class SessionMatch:
+    session: Session
+    score: float
+    distance: float
 
 
 class MemoryStore:
     """Synchronous façade over SQLite + sqlite-vec.
 
-    Async callers wrap with `asyncio.to_thread`.
+    Async callers wrap calls with ``asyncio.to_thread``.
     """
 
     def __init__(self, db_path: Path | str) -> None:
         self.db_path = Path(db_path)
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
 
+        self._connect()
+        self._migrate_or_rebuild()
+
+    def _connect(self) -> None:
         self.conn = sqlite3.connect(self.db_path, isolation_level=None)
         self.conn.row_factory = sqlite3.Row
         self.conn.enable_load_extension(True)
         sqlite_vec.load(self.conn)
         self.conn.enable_load_extension(False)
 
-        self._migrate()
+    def _migrate_or_rebuild(self) -> None:
+        """Detect a v1 schema and, if found, back the file up before rebuilding.
 
-    def _migrate(self) -> None:
+        v1 is identified by the presence of an `episodes` table and the absence
+        of `sessions`. Anything else is treated as either fresh or already v2,
+        and we just (re-)apply the idempotent v2 schema.
+        """
+        has_episodes = bool(
+            self.conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='episodes'"
+            ).fetchone()
+        )
+        has_sessions = bool(
+            self.conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='sessions'"
+            ).fetchone()
+        )
+
+        if has_episodes and not has_sessions:
+            self._backup_and_rebuild()
+            return
+
         with open(SCHEMA_PATH, encoding="utf-8") as f:
             self.conn.executescript(f.read())
+        self.conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
+
+    def _backup_and_rebuild(self) -> None:
+        """Close, rename db file to a timestamped backup, reopen with v2 schema."""
+        ts = datetime.now().strftime("%Y%m%d-%H%M%S")
+        backup_path = self.db_path.with_name(self.db_path.name + f".bak-{ts}")
+
+        self.conn.close()
+
+        if self.db_path.exists():
+            self.db_path.rename(backup_path)
+            sys.stderr.write(
+                "\n⚠️  기존 메모리 DB(v1) 를 v2 스키마로 새로 생성합니다.\n"
+                f"   원본은 {backup_path} 로 백업되었습니다.\n\n"
+            )
+            log.warning(
+                "memory.v1_db_backed_up",
+                db=str(self.db_path),
+                backup=str(backup_path),
+            )
+
+        self._connect()
+        with open(SCHEMA_PATH, encoding="utf-8") as f:
+            self.conn.executescript(f.read())
+        self.conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
 
     @contextmanager
     def tx(self) -> Iterator[sqlite3.Connection]:
@@ -162,53 +236,80 @@ class MemoryStore:
         rows = self.conn.execute("SELECT * FROM people ORDER BY id").fetchall()
         return [_row_to_person(r) for r in rows]
 
-    # ── episodes ───────────────────────────────────────────────────────
+    # ── sessions ───────────────────────────────────────────────────────
 
-    def add_episode(
+    def add_session(
         self,
-        summary: str | None = None,
         *,
-        primary_channel: str = "text",
-        when_at: str | None = None,
+        title: str | None = None,
+        summary: str | None = None,
+        started_at: str | None = None,
     ) -> int:
-        if primary_channel not in _VALID_CHANNELS:
-            raise ValueError(f"primary_channel must be one of {_VALID_CHANNELS}")
-        if when_at is not None:
+        if started_at is not None:
             cur = self.conn.execute(
-                "INSERT INTO episodes (when_at, summary, primary_channel) VALUES (?, ?, ?)",
-                (when_at, summary, primary_channel),
+                "INSERT INTO sessions (started_at, last_active_at, title, summary) "
+                "VALUES (?, ?, ?, ?)",
+                (started_at, started_at, title, summary),
             )
         else:
             cur = self.conn.execute(
-                "INSERT INTO episodes (summary, primary_channel) VALUES (?, ?)",
-                (summary, primary_channel),
+                "INSERT INTO sessions (title, summary) VALUES (?, ?)",
+                (title, summary),
             )
         return int(cur.lastrowid or 0)
 
-    def get_episode(self, episode_id: int) -> Episode | None:
+    def get_session(self, session_id: int) -> Session | None:
         row = self.conn.execute(
-            "SELECT id, when_at, summary, primary_channel FROM episodes WHERE id = ?",
-            (episode_id,),
+            "SELECT * FROM sessions WHERE id = ?", (session_id,)
         ).fetchone()
-        return _row_to_episode(row) if row else None
+        return _row_to_session(row) if row else None
 
-    def list_recent_episodes(self, limit: int = 20) -> list[Episode]:
-        rows = self.conn.execute(
-            "SELECT id, when_at, summary, primary_channel FROM episodes "
-            "ORDER BY when_at DESC LIMIT ?",
-            (limit,),
-        ).fetchall()
-        return [_row_to_episode(r) for r in rows]
+    def list_recent_sessions(
+        self, *, limit: int = 50, include_archived: bool = False
+    ) -> list[Session]:
+        if include_archived:
+            rows = self.conn.execute(
+                "SELECT * FROM sessions ORDER BY last_active_at DESC LIMIT ?",
+                (limit,),
+            ).fetchall()
+        else:
+            rows = self.conn.execute(
+                "SELECT * FROM sessions WHERE archived_at IS NULL "
+                "ORDER BY last_active_at DESC LIMIT ?",
+                (limit,),
+            ).fetchall()
+        return [_row_to_session(r) for r in rows]
 
-    def set_episode_summary(self, episode_id: int, summary: str) -> None:
+    def set_session_title(self, session_id: int, title: str) -> None:
         self.conn.execute(
-            "UPDATE episodes SET summary = ? WHERE id = ?",
-            (summary, episode_id),
+            "UPDATE sessions SET title = ?, last_active_at = CURRENT_TIMESTAMP "
+            "WHERE id = ?",
+            (title, session_id),
         )
 
-    def upsert_episode_embedding(
+    def set_session_summary(self, session_id: int, summary: str) -> None:
+        self.conn.execute(
+            "UPDATE sessions SET summary = ?, last_active_at = CURRENT_TIMESTAMP "
+            "WHERE id = ?",
+            (summary, session_id),
+        )
+
+    def touch_session(self, session_id: int) -> None:
+        self.conn.execute(
+            "UPDATE sessions SET last_active_at = CURRENT_TIMESTAMP WHERE id = ?",
+            (session_id,),
+        )
+
+    def archive_session(self, session_id: int) -> None:
+        self.conn.execute(
+            "UPDATE sessions SET archived_at = CURRENT_TIMESTAMP "
+            "WHERE id = ? AND archived_at IS NULL",
+            (session_id,),
+        )
+
+    def upsert_session_embedding(
         self,
-        episode_id: int,
+        session_id: int,
         vector: list[float],
         *,
         model_id: str,
@@ -218,52 +319,105 @@ class MemoryStore:
         if len(vector) != dim:
             raise ValueError(f"vector length {len(vector)} != dim {dim}")
         blob = struct.pack(f"{dim}f", *vector)
-        # vec0 virtual tables don't support INSERT OR REPLACE; delete then insert.
+        self.conn.execute("DELETE FROM vec_sessions WHERE session_id = ?", (session_id,))
         self.conn.execute(
-            "DELETE FROM vec_episodes WHERE episode_id = ?", (episode_id,)
+            "INSERT INTO vec_sessions (session_id, embedding) VALUES (?, ?)",
+            (session_id, blob),
         )
         self.conn.execute(
-            "INSERT INTO vec_episodes (episode_id, embedding) VALUES (?, ?)",
-            (episode_id, blob),
-        )
-        self.conn.execute(
-            "INSERT OR REPLACE INTO episode_embedding_meta "
-            "(episode_id, model_id, dim, task_type) VALUES (?, ?, ?, ?)",
-            (episode_id, model_id, dim, task_type),
+            "INSERT OR REPLACE INTO session_embedding_meta "
+            "(session_id, model_id, dim, task_type) VALUES (?, ?, ?, ?)",
+            (session_id, model_id, dim, task_type),
         )
 
-    def search_episodes_by_embedding(
+    def search_sessions_by_embedding(
         self,
         query_vector: list[float],
         *,
         limit: int = 5,
         recency_days: int = 7,
         recency_weight: float = 1.5,
-    ) -> list[EpisodeMatch]:
+    ) -> list[SessionMatch]:
         dim = len(query_vector)
         blob = struct.pack(f"{dim}f", *query_vector)
 
         candidates = self.conn.execute(
-            "SELECT episode_id, distance FROM vec_episodes "
+            "SELECT session_id, distance FROM vec_sessions "
             "WHERE embedding MATCH ? ORDER BY distance LIMIT ?",
             (blob, limit * 4),
         ).fetchall()
 
         now = datetime.now(tz=timezone.utc)
-        results: list[EpisodeMatch] = []
+        results: list[SessionMatch] = []
         for row in candidates:
-            ep = self.get_episode(row["episode_id"])
-            if ep is None:
+            sess = self.get_session(row["session_id"])
+            if sess is None:
                 continue
             distance = float(row["distance"])
             base_score = 1.0 / (1.0 + distance)
-            weight = _recency_weight(ep.when_at, now, recency_days, recency_weight)
+            weight = _recency_weight(sess.last_active_at, now, recency_days, recency_weight)
             results.append(
-                EpisodeMatch(episode=ep, score=base_score * weight, distance=distance)
+                SessionMatch(session=sess, score=base_score * weight, distance=distance)
             )
 
         results.sort(key=lambda m: m.score, reverse=True)
         return results[:limit]
+
+    # ── messages ───────────────────────────────────────────────────────
+
+    def add_message(self, session_id: int, role: str, content: str) -> int:
+        if role not in _VALID_ROLES:
+            raise ValueError(f"role must be one of {_VALID_ROLES}")
+        cur = self.conn.execute(
+            "INSERT INTO messages (session_id, role, content) VALUES (?, ?, ?)",
+            (session_id, role, content),
+        )
+        # Bump session.last_active_at on every message append.
+        self.conn.execute(
+            "UPDATE sessions SET last_active_at = CURRENT_TIMESTAMP WHERE id = ?",
+            (session_id,),
+        )
+        return int(cur.lastrowid or 0)
+
+    def list_messages(self, session_id: int) -> list[Message]:
+        rows = self.conn.execute(
+            "SELECT * FROM messages WHERE session_id = ? ORDER BY ts, id",
+            (session_id,),
+        ).fetchall()
+        return [_row_to_message(r) for r in rows]
+
+    def recall_messages(self, session_id: int, *, limit: int = 20) -> list[Message]:
+        """Return up to *limit* most-recent messages in chronological order."""
+        rows = self.conn.execute(
+            "SELECT * FROM ("
+            "  SELECT * FROM messages WHERE session_id = ? ORDER BY ts DESC, id DESC LIMIT ?"
+            ") ORDER BY ts, id",
+            (session_id, limit),
+        ).fetchall()
+        return [_row_to_message(r) for r in rows]
+
+    def upsert_message_embedding(
+        self,
+        message_id: int,
+        vector: list[float],
+        *,
+        model_id: str,
+        dim: int,
+        task_type: str,
+    ) -> None:
+        if len(vector) != dim:
+            raise ValueError(f"vector length {len(vector)} != dim {dim}")
+        blob = struct.pack(f"{dim}f", *vector)
+        self.conn.execute("DELETE FROM vec_messages WHERE message_id = ?", (message_id,))
+        self.conn.execute(
+            "INSERT INTO vec_messages (message_id, embedding) VALUES (?, ?)",
+            (message_id, blob),
+        )
+        self.conn.execute(
+            "INSERT OR REPLACE INTO message_embedding_meta "
+            "(message_id, model_id, dim, task_type) VALUES (?, ?, ?, ?)",
+            (message_id, model_id, dim, task_type),
+        )
 
     # ── events ─────────────────────────────────────────────────────────
 
@@ -333,14 +487,15 @@ class MemoryStore:
         object: str,
         *,
         confidence: float,
-        source_episode_id: int | None = None,
+        source_session_id: int | None = None,
     ) -> int:
         if not (0.0 <= confidence <= 1.0):
             raise ValueError("confidence must be between 0 and 1")
         cur = self.conn.execute(
-            "INSERT INTO facts (subject_person_id, predicate, object, confidence, source_episode_id) "
+            "INSERT INTO facts "
+            "(subject_person_id, predicate, object, confidence, source_session_id) "
             "VALUES (?, ?, ?, ?, ?)",
-            (subject_person_id, predicate, object, confidence, source_episode_id),
+            (subject_person_id, predicate, object, confidence, source_session_id),
         )
         return int(cur.lastrowid or 0)
 
@@ -362,27 +517,109 @@ class MemoryStore:
 
     # ── preferences ────────────────────────────────────────────────────
 
-    def upsert_preference(self, person_id: int, domain: str, value: str) -> None:
+    def upsert_preference(
+        self, person_id: int | None, domain: str, value: str
+    ) -> None:
+        # COALESCE in the unique index handles NULL person_id.
         self.conn.execute(
             "INSERT INTO preferences (person_id, domain, value) VALUES (?, ?, ?) "
-            "ON CONFLICT(person_id, domain, value) DO UPDATE SET "
+            "ON CONFLICT(COALESCE(person_id, -1), domain, value) DO UPDATE SET "
             "last_seen_at = CURRENT_TIMESTAMP",
             (person_id, domain, value),
         )
 
-    def list_preferences(self, person_id: int) -> list[Preference]:
-        rows = self.conn.execute(
-            "SELECT * FROM preferences WHERE person_id = ? "
-            "ORDER BY domain, value",
-            (person_id,),
-        ).fetchall()
+    def list_preferences(self, person_id: int | None) -> list[Preference]:
+        if person_id is None:
+            rows = self.conn.execute(
+                "SELECT * FROM preferences WHERE person_id IS NULL "
+                "ORDER BY domain, value"
+            ).fetchall()
+        else:
+            rows = self.conn.execute(
+                "SELECT * FROM preferences WHERE person_id = ? "
+                "ORDER BY domain, value",
+                (person_id,),
+            ).fetchall()
         return [_row_to_preference(r) for r in rows]
+
+    # ── notes ──────────────────────────────────────────────────────────
+
+    def add_note(
+        self,
+        content: str,
+        *,
+        tags: list[str] | None = None,
+        source_session_id: int | None = None,
+    ) -> int:
+        cur = self.conn.execute(
+            "INSERT INTO notes (content, tags, source_session_id) VALUES (?, ?, ?)",
+            (content, json.dumps(tags or [], ensure_ascii=False), source_session_id),
+        )
+        return int(cur.lastrowid or 0)
+
+    def update_note(
+        self,
+        note_id: int,
+        *,
+        content: str | None = None,
+        tags: list[str] | None = None,
+    ) -> None:
+        sets: list[str] = []
+        params: list[Any] = []
+        if content is not None:
+            sets.append("content = ?")
+            params.append(content)
+        if tags is not None:
+            sets.append("tags = ?")
+            params.append(json.dumps(tags, ensure_ascii=False))
+        if not sets:
+            return
+        sets.append("updated_at = CURRENT_TIMESTAMP")
+        params.append(note_id)
+        self.conn.execute(
+            f"UPDATE notes SET {', '.join(sets)} WHERE id = ?",
+            tuple(params),
+        )
+
+    def list_notes(self, *, include_archived: bool = False) -> list[Note]:
+        if include_archived:
+            rows = self.conn.execute(
+                "SELECT * FROM notes ORDER BY updated_at DESC, id DESC"
+            ).fetchall()
+        else:
+            rows = self.conn.execute(
+                "SELECT * FROM notes WHERE archived_at IS NULL "
+                "ORDER BY updated_at DESC, id DESC"
+            ).fetchall()
+        return [_row_to_note(r) for r in rows]
+
+    def archive_note(self, note_id: int) -> None:
+        self.conn.execute(
+            "UPDATE notes SET archived_at = CURRENT_TIMESTAMP "
+            "WHERE id = ? AND archived_at IS NULL",
+            (note_id,),
+        )
+
+    def search_notes_by_keyword(
+        self, keyword: str, *, limit: int = 5
+    ) -> list[Note]:
+        """Naïve LIKE-based note search. Embeddings come in a later PR."""
+        if not keyword.strip():
+            return []
+        pattern = f"%{keyword.strip()}%"
+        rows = self.conn.execute(
+            "SELECT * FROM notes "
+            "WHERE archived_at IS NULL AND content LIKE ? "
+            "ORDER BY updated_at DESC LIMIT ?",
+            (pattern, limit),
+        ).fetchall()
+        return [_row_to_note(r) for r in rows]
 
     # ── attachments ────────────────────────────────────────────────────
 
     def add_attachment(
         self,
-        episode_id: int,
+        session_id: int,
         *,
         sha256: str,
         path: str,
@@ -393,25 +630,25 @@ class MemoryStore:
     ) -> int:
         cur = self.conn.execute(
             "INSERT INTO attachments "
-            "(episode_id, sha256, mime, ext, byte_size, path, description) "
+            "(session_id, sha256, mime, ext, byte_size, path, description) "
             "VALUES (?, ?, ?, ?, ?, ?, ?)",
-            (episode_id, sha256, mime, ext, byte_size, path, description),
+            (session_id, sha256, mime, ext, byte_size, path, description),
         )
         return int(cur.lastrowid or 0)
 
-    def list_attachments(self, episode_id: int) -> list[Attachment]:
+    def list_attachments(self, session_id: int) -> list[Attachment]:
         rows = self.conn.execute(
-            "SELECT * FROM attachments WHERE episode_id = ? ORDER BY id",
-            (episode_id,),
+            "SELECT * FROM attachments WHERE session_id = ? ORDER BY id",
+            (session_id,),
         ).fetchall()
         return [_row_to_attachment(r) for r in rows]
 
     def find_attachment_by_sha256(
-        self, episode_id: int, sha256: str
+        self, session_id: int, sha256: str
     ) -> Attachment | None:
         row = self.conn.execute(
-            "SELECT * FROM attachments WHERE episode_id = ? AND sha256 = ?",
-            (episode_id, sha256),
+            "SELECT * FROM attachments WHERE session_id = ? AND sha256 = ?",
+            (session_id, sha256),
         ).fetchone()
         return _row_to_attachment(row) if row else None
 
@@ -431,12 +668,24 @@ def _row_to_person(r: sqlite3.Row) -> Person:
     )
 
 
-def _row_to_episode(r: sqlite3.Row) -> Episode:
-    return Episode(
+def _row_to_session(r: sqlite3.Row) -> Session:
+    return Session(
         id=r["id"],
-        when_at=r["when_at"],
+        started_at=r["started_at"],
+        last_active_at=r["last_active_at"],
+        title=r["title"],
         summary=r["summary"],
-        primary_channel=r["primary_channel"],
+        archived_at=r["archived_at"],
+    )
+
+
+def _row_to_message(r: sqlite3.Row) -> Message:
+    return Message(
+        id=r["id"],
+        session_id=r["session_id"],
+        role=r["role"],
+        content=r["content"],
+        ts=r["ts"],
     )
 
 
@@ -460,7 +709,7 @@ def _row_to_fact(r: sqlite3.Row) -> Fact:
         predicate=r["predicate"],
         object=r["object"],
         confidence=r["confidence"],
-        source_episode_id=r["source_episode_id"],
+        source_session_id=r["source_session_id"],
         valid_from=r["valid_from"],
         archived_at=r["archived_at"],
     )
@@ -475,10 +724,28 @@ def _row_to_preference(r: sqlite3.Row) -> Preference:
     )
 
 
+def _row_to_note(r: sqlite3.Row) -> Note:
+    try:
+        tags = json.loads(r["tags"])
+        if not isinstance(tags, list):
+            tags = []
+    except (json.JSONDecodeError, TypeError):
+        tags = []
+    return Note(
+        id=r["id"],
+        content=r["content"],
+        tags=tags,
+        source_session_id=r["source_session_id"],
+        created_at=r["created_at"],
+        updated_at=r["updated_at"],
+        archived_at=r["archived_at"],
+    )
+
+
 def _row_to_attachment(r: sqlite3.Row) -> Attachment:
     return Attachment(
         id=r["id"],
-        episode_id=r["episode_id"],
+        session_id=r["session_id"],
         sha256=r["sha256"],
         mime=r["mime"],
         ext=r["ext"],
@@ -495,16 +762,13 @@ def _recency_weight(
     recency_days: int,
     recency_weight: float,
 ) -> float:
-    """Return recency_weight if episode is within recency_days, else 1.0."""
+    """Return recency_weight if *when_at_iso* is within recency_days, else 1.0."""
     try:
-        # Parse ISO string (with or without timezone)
         ts_str = when_at_iso.replace("Z", "+00:00")
         try:
             ts = datetime.fromisoformat(ts_str)
         except ValueError:
-            # Fallback: strip trailing fractional seconds weirdness
             ts = datetime.fromisoformat(ts_str[:19])
-        # Make both tz-aware or both naive for comparison
         if ts.tzinfo is None:
             now_cmp = now.replace(tzinfo=None)
         else:

@@ -10,7 +10,7 @@ from dataclasses import dataclass, field
 
 import structlog
 
-from apps.consolidator.extractor import ExtractedEvent, ExtractedFact
+from apps.consolidator.extractor import ExtractedEvent, ExtractedFact, ExtractedNote
 from apps.memory.store import MemoryStore, Person
 
 log = structlog.get_logger(__name__)
@@ -75,7 +75,7 @@ def promote_fact(
     store: MemoryStore,
     fact: ExtractedFact,
     *,
-    source_episode_id: int | None = None,
+    source_session_id: int | None = None,
     confidence_threshold: float = CONFIDENCE_THRESHOLD,
 ) -> PromotionOutcome:
     """Promote a single extracted fact to semantic memory.
@@ -152,7 +152,7 @@ def promote_fact(
         predicate=fact.predicate,
         object=fact.object,
         confidence=fact.confidence,
-        source_episode_id=source_episode_id,
+        source_session_id=source_session_id,
     )
     action = _ACTION_ARCHIVED_AND_ADDED if archived_ids else _ACTION_ADDED
     log.info(
@@ -229,3 +229,36 @@ def promote_event(
         log.error("promoter.event_add_error", error=msg)
         errors.append(msg)
         return None
+
+
+def promote_note(
+    store: MemoryStore,
+    note: ExtractedNote,
+    *,
+    source_session_id: int | None = None,
+) -> int | None:
+    """Add an extracted note to the notes table.
+
+    Skips empty content and duplicate-content notes that already exist
+    (active or archived). Otherwise inserts a new row and returns its id.
+    """
+    content = note.content.strip()
+    if not content:
+        log.debug("promoter.skipped_note_empty")
+        return None
+
+    existing = store.conn.execute(
+        "SELECT id FROM notes WHERE content = ? LIMIT 1",
+        (content,),
+    ).fetchone()
+    if existing is not None:
+        log.debug("promoter.note_duplicate", existing_id=existing["id"])
+        return None
+
+    note_id = store.add_note(
+        content=content,
+        tags=note.tags,
+        source_session_id=source_session_id,
+    )
+    log.info("promoter.added_note", note_id=note_id, tags=note.tags)
+    return note_id

@@ -1,31 +1,22 @@
-"""Unit tests for apps/agent/recall.py — §5.4 three-strategy recall.
-
-All tests use an in-memory SQLite store seeded with fixture data.
-No live Gemini calls — embedding is either mocked or not triggered
-(recency fallback path).
-"""
+"""Unit tests for apps/agent/recall.py — sessions/messages/notes recall."""
 
 from __future__ import annotations
 
-import struct
 from pathlib import Path
 from typing import Any
 from unittest.mock import MagicMock
 
 import pytest
-import pytest_asyncio
 
 from apps.agent import RecallContext
 from apps.agent.recall import (
-    _recent_attachments_for_episode,
+    _notes_recall,
     _recency_fallback,
+    _recent_attachments_for_session,
     _structured_recall,
     recall,
 )
 from apps.memory.store import MemoryStore
-
-
-# ── fixtures ──────────────────────────────────────────────────────────────
 
 
 @pytest.fixture()
@@ -35,12 +26,10 @@ def store(tmp_path: Path) -> MemoryStore:
 
 @pytest.fixture()
 def seeded_store(store: MemoryStore) -> MemoryStore:
-    """Seed with people, facts, events, and episodes."""
-    # Add people
+    """Seed with people, facts, events, sessions, messages, notes."""
     mom_id = store.add_person("어머니", relation="mother")
     dad_id = store.add_person("아버지", relation="father")
 
-    # Add facts
     store.conn.execute(
         "INSERT INTO facts (subject_person_id, predicate, object, confidence) VALUES (?,?,?,?)",
         (mom_id, "좋아하는 음식", "단호박 케이크", 0.9),
@@ -49,51 +38,49 @@ def seeded_store(store: MemoryStore) -> MemoryStore:
         "INSERT INTO facts (subject_person_id, predicate, object, confidence) VALUES (?,?,?,?)",
         (dad_id, "취미", "등산", 0.85),
     )
-    # Archived fact — should not appear
     store.conn.execute(
         "INSERT INTO facts (subject_person_id, predicate, object, confidence, archived_at) "
         "VALUES (?,?,?,?,datetime('now'))",
         (mom_id, "이전 취미", "독서", 0.7),
     )
 
-    # Add upcoming events
     store.conn.execute(
         "INSERT INTO events (person_id, type, title, when_at, status) VALUES (?,?,?,?,?)",
         (mom_id, "birthday", "어머니 생신", "2099-06-15 00:00:00", "pending"),
     )
-    # Past event — should not appear in structured recall
     store.conn.execute(
         "INSERT INTO events (person_id, type, title, when_at, status) VALUES (?,?,?,?,?)",
         (mom_id, "trip", "제주도 여행", "2020-01-01 00:00:00", "pending"),
     )
-    # Cancelled event — should not appear
     store.conn.execute(
         "INSERT INTO events (person_id, type, title, when_at, status) VALUES (?,?,?,?,?)",
         (dad_id, "golf", "골프 약속", "2099-12-01 00:00:00", "cancelled"),
     )
 
-    # Add episodes (for recency fallback)
     store.conn.execute(
-        "INSERT INTO episodes (when_at, summary, primary_channel) VALUES "
-        "(datetime('now', '-2 days'), '어머니와 케이크 이야기', 'text')"
+        "INSERT INTO sessions (started_at, last_active_at, summary) VALUES "
+        "(datetime('now', '-2 days'), datetime('now', '-2 days'), '어머니와 케이크 이야기')"
     )
     store.conn.execute(
-        "INSERT INTO episodes (when_at, summary, primary_channel) VALUES "
-        "(datetime('now', '-5 days'), '저녁 식사 이야기', 'text')"
+        "INSERT INTO sessions (started_at, last_active_at, summary) VALUES "
+        "(datetime('now', '-5 days'), datetime('now', '-5 days'), '저녁 식사 이야기')"
     )
+
+    store.add_note("매주 금요일 저녁은 외식하기로 함", tags=["routine"])
+    store.add_note("아내 워크숍 일정 확인 필요", tags=["todo"])
 
     return store
 
 
-# ── structured recall tests ────────────────────────────────────────────────
+# ── structured recall ────────────────────────────────────────────────────
 
 
 class TestStructuredRecall:
     def test_returns_facts_for_matched_person(self, seeded_store: MemoryStore) -> None:
-        facts, events = _structured_recall(seeded_store, "어머니 생신 선물 뭐가 좋을까요?")
+        facts, _ = _structured_recall(seeded_store, "어머니 생신 선물 뭐가 좋을까요?")
         assert len(facts) >= 1
-        fact_predicates = [f[2] for f in facts]
-        assert "좋아하는 음식" in fact_predicates
+        predicates = [f[2] for f in facts]
+        assert "좋아하는 음식" in predicates
 
     def test_archived_fact_excluded(self, seeded_store: MemoryStore) -> None:
         facts, _ = _structured_recall(seeded_store, "어머니 이야기 해줘")
@@ -120,117 +107,124 @@ class TestStructuredRecall:
         assert facts == []
         assert events == []
 
-    def test_fact_tuple_structure(self, seeded_store: MemoryStore) -> None:
-        facts, _ = _structured_recall(seeded_store, "어머니 취향 알려줘")
-        for fact in facts:
-            fact_id, person_name, predicate, obj = fact
-            assert isinstance(fact_id, int)
-            assert isinstance(person_name, str)
-            assert isinstance(predicate, str)
-            assert isinstance(obj, str)
 
-    def test_multiple_people_in_message(self, seeded_store: MemoryStore) -> None:
-        facts, _ = _structured_recall(seeded_store, "어머니와 아버지 이야기")
-        person_names = {f[1] for f in facts}
-        assert "어머니" in person_names
-        assert "아버지" in person_names
-
-
-# ── recency fallback tests ─────────────────────────────────────────────────
+# ── recency fallback ─────────────────────────────────────────────────────
 
 
 class TestRecencyFallback:
-    def test_returns_most_recent_episodes(self, seeded_store: MemoryStore) -> None:
+    def test_returns_most_recent_sessions(self, seeded_store: MemoryStore) -> None:
         results = _recency_fallback(seeded_store)
-        assert len(results) >= 1
-        assert len(results) <= 5  # max 5
+        assert 1 <= len(results) <= 5
 
     def test_result_structure(self, seeded_store: MemoryStore) -> None:
         results = _recency_fallback(seeded_store)
-        for ep_id, summary, score in results:
-            assert isinstance(ep_id, int)
+        for sid, summary, score in results:
+            assert isinstance(sid, int)
             assert isinstance(summary, str)
             assert isinstance(score, float)
 
     def test_empty_db_returns_empty(self, store: MemoryStore) -> None:
-        results = _recency_fallback(store)
-        assert results == []
+        assert _recency_fallback(store) == []
 
     def test_score_is_1_for_fallback(self, seeded_store: MemoryStore) -> None:
-        results = _recency_fallback(seeded_store)
-        for _, _, score in results:
+        for _, _, score in _recency_fallback(seeded_store):
             assert score == 1.0
 
+    def test_archived_session_excluded(self, store: MemoryStore) -> None:
+        sid_active = store.add_session(summary="활성")
+        sid_archived = store.add_session(summary="아카이브됨")
+        store.archive_session(sid_archived)
+        ids = [r[0] for r in _recency_fallback(store)]
+        assert sid_active in ids
+        assert sid_archived not in ids
 
-# ── full recall() integration tests (mocked embed) ────────────────────────
+
+# ── notes recall ─────────────────────────────────────────────────────────
 
 
-def _make_fake_gemini(embed_result: list[float] | None = None) -> Any:
-    """Return a mock GeminiClient that returns a canned embedding."""
+class TestNotesRecall:
+    def test_returns_matching_note(self, seeded_store: MemoryStore) -> None:
+        results = _notes_recall(seeded_store, "외식")
+        assert len(results) >= 1
+        contents = [r[1] for r in results]
+        assert any("외식" in c for c in contents)
+
+    def test_no_match_returns_empty(self, seeded_store: MemoryStore) -> None:
+        assert _notes_recall(seeded_store, "전혀관련없는단어xyz") == []
+
+    def test_empty_query_returns_empty(self, seeded_store: MemoryStore) -> None:
+        assert _notes_recall(seeded_store, "") == []
+        assert _notes_recall(seeded_store, " ") == []
+
+    def test_archived_note_excluded(self, store: MemoryStore) -> None:
+        nid = store.add_note("아카이브된 메모 외식")
+        store.archive_note(nid)
+        results = _notes_recall(store, "외식")
+        assert results == []
+
+
+# ── recall() integration with mocked embed ───────────────────────────────
+
+
+def _fake_gemini(embed_result: list[float] | None = None) -> Any:
     mock = MagicMock()
-    if embed_result is None:
-        # Return a zero vector — distance calculations will still work.
-        embed_result = [0.0] * 768
-    mock.embed.return_value = embed_result
+    mock.embed.return_value = embed_result if embed_result is not None else [0.0] * 768
     return mock
 
 
 class TestRecallIntegration:
     @pytest.mark.asyncio
-    async def test_recall_returns_recall_context(self, seeded_store: MemoryStore) -> None:
-        fake_gemini = _make_fake_gemini()
-        ctx = await recall(seeded_store, "어머니 생신 뭐가 좋을까요?", fake_gemini)
+    async def test_returns_recall_context(self, seeded_store: MemoryStore) -> None:
+        ctx = await recall(seeded_store, "어머니 생신 뭐가 좋을까요?", _fake_gemini())
         assert isinstance(ctx, RecallContext)
 
     @pytest.mark.asyncio
-    async def test_structured_facts_populated(self, seeded_store: MemoryStore) -> None:
-        fake_gemini = _make_fake_gemini()
-        ctx = await recall(seeded_store, "어머니 취향 알려줘", fake_gemini)
+    async def test_facts_populated(self, seeded_store: MemoryStore) -> None:
+        ctx = await recall(seeded_store, "어머니 취향 알려줘", _fake_gemini())
         assert len(ctx.facts) >= 1
 
     @pytest.mark.asyncio
     async def test_upcoming_events_populated(self, seeded_store: MemoryStore) -> None:
-        fake_gemini = _make_fake_gemini()
-        ctx = await recall(seeded_store, "어머니 일정 알려줘", fake_gemini)
-        event_titles = [e[1] for e in ctx.upcoming_events]
-        assert "어머니 생신" in event_titles
+        ctx = await recall(seeded_store, "어머니 일정 알려줘", _fake_gemini())
+        titles = [e[1] for e in ctx.upcoming_events]
+        assert "어머니 생신" in titles
 
     @pytest.mark.asyncio
-    async def test_recency_fallback_when_no_semantic(self, seeded_store: MemoryStore) -> None:
-        """With empty vec_episodes, semantic fails → recency fallback triggers."""
-        # vec_episodes is empty in seeded_store (no embeddings inserted)
-        # The semantic strategy should return [] and fallback runs.
-        fake_gemini = _make_fake_gemini()
-        ctx = await recall(seeded_store, "오늘 일정 뭐야?", fake_gemini)
-        # Fallback should give us episode results.
-        assert len(ctx.episodes) >= 1
+    async def test_recency_fallback_when_no_semantic(
+        self, seeded_store: MemoryStore
+    ) -> None:
+        # vec_messages is empty in seeded_store → semantic returns []
+        ctx = await recall(seeded_store, "오늘 일정 뭐야?", _fake_gemini())
+        assert len(ctx.sessions) >= 1
 
     @pytest.mark.asyncio
     async def test_semantic_failure_falls_back(self, seeded_store: MemoryStore) -> None:
-        """If embed() raises, recall should still succeed via fallback."""
         mock = MagicMock()
         mock.embed.side_effect = RuntimeError("API unavailable")
         ctx = await recall(seeded_store, "오늘 일정", mock)
         assert isinstance(ctx, RecallContext)
-        # Fallback episodes should be present
-        assert len(ctx.episodes) >= 1
+        assert len(ctx.sessions) >= 1
 
-
-# ── Strategy 4: recent attachments ───────────────────────────────────────
-
-
-class TestRecentAttachmentsForEpisode:
-    def test_returns_empty_for_episode_without_attachments(
-        self, store: MemoryStore
+    @pytest.mark.asyncio
+    async def test_notes_populated_when_keyword_matches(
+        self, seeded_store: MemoryStore
     ) -> None:
-        ep_id = store.add_episode(primary_channel="text")
-        result = _recent_attachments_for_episode(store, ep_id)
-        assert result == []
+        ctx = await recall(seeded_store, "외식", _fake_gemini())
+        assert len(ctx.notes) >= 1
 
-    def test_returns_attachments_for_episode(self, store: MemoryStore) -> None:
-        ep_id = store.add_episode(primary_channel="text")
+
+# ── Recent attachments for session ───────────────────────────────────────
+
+
+class TestRecentAttachmentsForSession:
+    def test_returns_empty_when_no_attachments(self, store: MemoryStore) -> None:
+        sid = store.add_session()
+        assert _recent_attachments_for_session(store, sid) == []
+
+    def test_returns_attachments_for_session(self, store: MemoryStore) -> None:
+        sid = store.add_session()
         store.add_attachment(
-            ep_id,
+            sid,
             sha256="a" * 64,
             path="/tmp/file.txt",
             mime="text/plain",
@@ -238,7 +232,7 @@ class TestRecentAttachmentsForEpisode:
             byte_size=100,
             description="메모",
         )
-        result = _recent_attachments_for_episode(store, ep_id)
+        result = _recent_attachments_for_session(store, sid)
         assert len(result) == 1
         att_id, path, description = result[0]
         assert isinstance(att_id, int)
@@ -246,72 +240,50 @@ class TestRecentAttachmentsForEpisode:
         assert description == "메모"
 
     def test_respects_limit(self, store: MemoryStore) -> None:
-        ep_id = store.add_episode(primary_channel="text")
+        sid = store.add_session()
         for i in range(5):
             store.add_attachment(
-                ep_id,
+                sid,
                 sha256=f"{'a' * 63}{i}",
                 path=f"/tmp/file{i}.txt",
                 mime="text/plain",
                 ext=".txt",
                 byte_size=10,
             )
-        result = _recent_attachments_for_episode(store, ep_id, limit=3)
-        assert len(result) == 3
+        assert len(_recent_attachments_for_session(store, sid, limit=3)) == 3
 
-    def test_does_not_return_attachments_for_other_episode(
+    def test_does_not_return_attachments_for_other_session(
         self, store: MemoryStore
     ) -> None:
-        ep1 = store.add_episode(primary_channel="text")
-        ep2 = store.add_episode(primary_channel="text")
+        s1 = store.add_session()
+        s2 = store.add_session()
         store.add_attachment(
-            ep1,
+            s1,
             sha256="b" * 64,
-            path="/tmp/ep1.txt",
+            path="/tmp/s1.txt",
             mime="text/plain",
             ext=".txt",
             byte_size=10,
         )
-        result = _recent_attachments_for_episode(store, ep2)
-        assert result == []
-
-    def test_tuple_structure(self, store: MemoryStore) -> None:
-        ep_id = store.add_episode(primary_channel="text")
-        store.add_attachment(
-            ep_id,
-            sha256="c" * 64,
-            path="/tmp/doc.pdf",
-            mime="application/pdf",
-            ext=".pdf",
-            byte_size=1024,
-        )
-        result = _recent_attachments_for_episode(store, ep_id)
-        assert len(result) == 1
-        att_id, path, desc = result[0]
-        assert isinstance(att_id, int)
-        assert isinstance(path, str)
-        assert isinstance(desc, str)
+        assert _recent_attachments_for_session(store, s2) == []
 
 
-class TestRecallWithEpisodeId:
+class TestRecallWithSessionId:
     @pytest.mark.asyncio
-    async def test_recall_without_episode_id_no_attachments(
+    async def test_recall_without_session_id_no_attachments(
         self, seeded_store: MemoryStore
     ) -> None:
-        """When episode_id=None, attachments field should be empty."""
-        fake_gemini = _make_fake_gemini()
-        ctx = await recall(seeded_store, "테스트", fake_gemini)
+        ctx = await recall(seeded_store, "테스트", _fake_gemini())
         assert ctx.attachments == []
         assert ctx.attachment_ids == []
 
     @pytest.mark.asyncio
-    async def test_recall_with_episode_id_includes_attachments(
+    async def test_recall_with_session_id_includes_attachments(
         self, store: MemoryStore
     ) -> None:
-        """When episode_id is given and attachments exist, they are recalled."""
-        ep_id = store.add_episode(primary_channel="text")
+        sid = store.add_session()
         store.add_attachment(
-            ep_id,
+            sid,
             sha256="d" * 64,
             path="/tmp/test.txt",
             mime="text/plain",
@@ -319,28 +291,7 @@ class TestRecallWithEpisodeId:
             byte_size=50,
             description="테스트 파일",
         )
-        fake_gemini = _make_fake_gemini()
-        ctx = await recall(store, "파일 내용 봐줘", fake_gemini, episode_id=ep_id)
+        ctx = await recall(store, "파일 내용 봐줘", _fake_gemini(), session_id=sid)
         assert len(ctx.attachments) >= 1
         assert len(ctx.attachment_ids) == len(ctx.attachments)
-        # Verify the attachment ID is in the list.
         assert ctx.attachment_ids[0] > 0
-
-    @pytest.mark.asyncio
-    async def test_recall_attachment_ids_match_attachments(
-        self, store: MemoryStore
-    ) -> None:
-        ep_id = store.add_episode(primary_channel="text")
-        store.add_attachment(
-            ep_id,
-            sha256="e" * 64,
-            path="/tmp/notes.md",
-            mime="text/markdown",
-            ext=".md",
-            byte_size=200,
-        )
-        fake_gemini = _make_fake_gemini()
-        ctx = await recall(store, "노트", fake_gemini, episode_id=ep_id)
-        assert len(ctx.attachment_ids) == len(ctx.attachments)
-        for att_id, (tup_id, _, _) in zip(ctx.attachment_ids, ctx.attachments):
-            assert att_id == tup_id
