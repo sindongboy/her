@@ -387,6 +387,7 @@ make backup        # data/ 암호화 tar.gz
   - Phase 0~4 로드맵 → v0~v3 (web chat MVP / 메모리 패널 / Consolidator 자동화 / notes 임베딩).
   - 무효화된 결정: macOS `say` TTS, Gemini TTS, 음성 파이프라인 Path B, Wake Word, Presence orb, launchd 데몬, Proactive 발화 엔진. 향후 음성 재도입은 신규 결정으로 시작.
 - _2026-05-02_: **웹 UI 변경 시 시각 검증 필수** (§10.2). 동기: 단위 테스트 (TestClient + WS) 가 통과해도 색·레이아웃·빈 영역 같은 시각 회귀를 못 잡음 — 실제 사용자가 먼저 발견하면 *"촌시럽고 구시대적"* 같은 피드백으로 돌아옴. 절차: headless Chrome 으로 PNG 캡처 → Read 도구로 직접 시각 확인 → 문제 발견 시 수정 → 깔끔해질 때까지 반복. chrome MCP 활성화되면 그쪽 우선, 아니면 `--headless --screenshot` fallback.
+- _2026-05-02_: **번역 LLM = `gemini-2.5-flash-lite`** (apps/tools/translate.py). 사용처: 주식 뉴스 위젯의 영문 헤드라인·스니펫을 한국어로. 사용자가 "비용효율적인 모델 자율 선택" 권한 부여 (§3.1 의 사전 승인 절차 충족). Flash 의 ~1/3 비용이지만 번역에는 충분 — 시세 (Pro) / 추출 (Flash) 보다 한 단계 더 가볍게. 페일-오픈 (키 없거나 호출 실패 시 원문 그대로 반환).
 
 ---
 

@@ -121,6 +121,16 @@ async def search_news(
                     "source": _domain_from_url(item.get("url") or ""),
                 }
             )
+
+        # Translate title + content to Korean using the cheapest Gemini.
+        # Falls open: returns the originals if the translator isn't usable.
+        try:
+            from apps.tools.translate import translate_news_to_korean
+
+            norm = await translate_news_to_korean(norm)
+        except Exception as exc:
+            log.warning("tavily.translate_skipped", error=str(exc))
+
         _cache[cache_key] = (time.monotonic(), norm)
         log.info("tavily.search.ok", query=query, count=len(norm))
         return norm

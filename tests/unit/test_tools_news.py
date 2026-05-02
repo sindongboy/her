@@ -18,6 +18,17 @@ def _clear_cache():
     news._cache.clear()
 
 
+@pytest.fixture(autouse=True)
+def _disable_translate(monkeypatch):
+    """Translation runs after Tavily and would alter test fixtures. Patch
+    it to a passthrough so news-tool tests can assert on raw content."""
+    async def passthrough(items):
+        return items
+    monkeypatch.setattr(
+        "apps.tools.translate.translate_news_to_korean", passthrough
+    )
+
+
 class TestLooksLikeNewsQuery:
     @pytest.mark.parametrize("msg", [
         "테슬라 최근 뉴스 알려줘",
