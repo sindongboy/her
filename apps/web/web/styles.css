@@ -1449,28 +1449,40 @@ body.mm-open { overflow: hidden; }
 }
 .session-actions {
   display: flex;
-  gap: 1px;
-  opacity: 0.4;
+  gap: 2px;
+  opacity: 0.7;
   transition: opacity 0.12s;
 }
 .session-item:hover .session-actions,
 .session-item.active .session-actions { opacity: 1; }
 .session-actions button {
-  background: transparent;
-  border: none;
-  color: var(--text-faint);
-  width: 22px;
-  height: 22px;
-  border-radius: 4px;
+  background: rgba(255,255,255,0.04);
+  border: 1px solid var(--line);
+  color: var(--text-dim);
+  width: 24px;
+  height: 24px;
+  border-radius: 5px;
   display: inline-flex;
   align-items: center;
   justify-content: center;
   padding: 0;
   cursor: pointer;
+  transition: background 0.12s, color 0.12s, border-color 0.12s;
 }
-.session-actions button:hover { background: var(--bg-hover); color: var(--text); }
-.session-actions button[data-action="archive"]:hover { color: var(--c-error); }
-.session-actions button .icon { width: 12px; height: 12px; }
+.session-actions button:hover {
+  background: var(--bg-hover);
+  color: var(--text);
+  border-color: var(--line-strong);
+}
+.session-actions button[data-action="archive"] {
+  color: rgba(233, 138, 142, 0.8);
+}
+.session-actions button[data-action="archive"]:hover {
+  color: var(--c-error);
+  background: rgba(233, 138, 142, 0.12);
+  border-color: rgba(233, 138, 142, 0.4);
+}
+.session-actions button .icon { width: 13px; height: 13px; }
 
 .session-rename-input {
   width: 100%;
