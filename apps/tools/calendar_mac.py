@@ -15,8 +15,10 @@ from __future__ import annotations
 
 import asyncio
 import platform
+import shutil
 import sys
 from dataclasses import dataclass
+from pathlib import Path
 
 import structlog
 
@@ -148,9 +150,15 @@ def _parse_line(line: str) -> CalendarEvent | None:
 
 
 # In-memory cache so the widget polling every 5 minutes doesn't keep
-# osascript busy. Keyed on (days_ahead, max_events).
-_CACHE_TTL_S: float = 120.0
+# the helper busy. Keyed on (days_ahead, max_events).
+_CACHE_TTL_S: float = 600.0  # 10 min — cache is refreshed in the background
 _events_cache: dict[tuple[int, int], tuple[float, list["CalendarEvent"]]] = {}
+
+# Compiled Swift helper — much faster than AppleScript whose-clauses.
+_HELPER_SOURCE = Path(__file__).parent / "calendar_helper.swift"
+_HELPER_BIN = Path.home() / ".her" / "bin" / "her_calendar_helper"
+_helper_compile_attempted = False
+_helper_compile_lock = asyncio.Lock()
 
 
 def _resolve_skip_names() -> list[str]:
@@ -174,19 +182,118 @@ def _format_applescript_list(names: list[str]) -> str:
     return "{" + quoted + "}"
 
 
+async def _ensure_helper_compiled() -> Path | None:
+    """Compile the Swift helper to ~/.her/bin/her_calendar_helper if needed.
+    Returns the binary path, or None when the toolchain is unavailable."""
+    global _helper_compile_attempted
+
+    if _HELPER_BIN.exists():
+        return _HELPER_BIN
+
+    async with _helper_compile_lock:
+        if _HELPER_BIN.exists():
+            return _HELPER_BIN
+        if _helper_compile_attempted:
+            # Already failed once in this process — don't keep retrying.
+            return None
+        _helper_compile_attempted = True
+
+        if not _HELPER_SOURCE.exists():
+            log.warning("calendar.helper_source_missing", path=str(_HELPER_SOURCE))
+            return None
+        if shutil.which("swiftc") is None:
+            log.info("calendar.swiftc_unavailable")
+            return None
+
+        _HELPER_BIN.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                "swiftc", str(_HELPER_SOURCE), "-o", str(_HELPER_BIN),
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            _, err = await asyncio.wait_for(proc.communicate(), timeout=60)
+            if proc.returncode != 0:
+                log.warning(
+                    "calendar.helper_compile_failed",
+                    returncode=proc.returncode,
+                    stderr=(err.decode(errors="replace") or "")[:300],
+                )
+                return None
+        except (asyncio.TimeoutError, OSError) as exc:
+            log.warning("calendar.helper_compile_error", error=str(exc))
+            return None
+
+        log.info("calendar.helper_compiled", path=str(_HELPER_BIN))
+        return _HELPER_BIN
+
+
+async def _fetch_via_swift(
+    days_ahead: int, timeout_s: float
+) -> list[CalendarEvent] | None:
+    """Run the EventKit-backed Swift helper. Returns None when the helper
+    isn't usable so the caller can fall back to AppleScript."""
+    binary = await _ensure_helper_compiled()
+    if binary is None:
+        return None
+
+    proc: asyncio.subprocess.Process | None = None
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            str(binary), str(int(days_ahead)),
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        stdout_b, stderr_b = await asyncio.wait_for(
+            proc.communicate(), timeout=timeout_s
+        )
+    except asyncio.TimeoutError:
+        if proc is not None:
+            try: proc.kill()
+            except ProcessLookupError: pass
+            await proc.wait()
+        log.warning("calendar.helper_timeout")
+        return None
+    except OSError as exc:
+        log.warning("calendar.helper_spawn_failed", error=str(exc))
+        return None
+
+    if proc.returncode == 77:
+        # TCC permission denied — surface as the existing exception.
+        raise CalendarUnavailable(_TCC_INSTRUCTION)
+    if proc.returncode != 0:
+        stderr = (stderr_b or b"").decode(errors="replace")[:300]
+        log.warning("calendar.helper_error", returncode=proc.returncode, stderr=stderr)
+        return None
+
+    stdout = (stdout_b or b"").decode("utf-8", errors="replace")
+    events: list[CalendarEvent] = []
+    skip = set(_resolve_skip_names())
+    for line in stdout.splitlines():
+        if not line.strip():
+            continue
+        event = _parse_line(line)
+        if event is None:
+            continue
+        if event.calendar_name in skip:
+            continue
+        events.append(event)
+    return events
+
+
 async def get_events(
     *,
     days_ahead: int = 2,
     max_events: int = 50,
     timeout_s: float = 60.0,
 ) -> list[CalendarEvent]:
-    """Read events from macOS Calendar.app via osascript.
+    """Read events from macOS Calendar via EventKit (Swift helper) with
+    AppleScript as fallback.
 
     Returns events from today 00:00 (local) until +days_ahead days, sorted
     ascending by start time. Auto-generated calendars (Birthdays, Holidays,
     Siri Suggestions, etc.) are skipped by default — override via env vars.
-    Results are cached in memory for 2 min so widget polls don't hammer
-    osascript.
+    Results are cached in memory for 10 min.
 
     Raises:
         CalendarUnavailable: Non-macOS, no TCC permission, timeout, etc.
@@ -203,6 +310,25 @@ async def get_events(
         log.debug("calendar.cache_hit", count=len(cached[1]))
         return cached[1]
 
+    # Fast path: EventKit via Swift helper (~1s vs ~22s for AppleScript).
+    swift_events = await _fetch_via_swift(days_ahead=days_ahead, timeout_s=15.0)
+    if swift_events is not None:
+        events = swift_events
+        log.info("calendar.fetched_via_swift", count=len(events))
+    else:
+        # Slow fallback for environments without swiftc / on helper failure.
+        events = await _fetch_via_applescript(
+            days_ahead=days_ahead, timeout_s=timeout_s
+        )
+
+    return _post_process_and_cache(events, cache_key, max_events, now)
+
+
+async def _fetch_via_applescript(
+    *, days_ahead: int, timeout_s: float
+) -> list[CalendarEvent]:
+    """Original AppleScript path — kept as a fallback when swiftc is
+    unavailable or the Swift helper fails for any reason."""
     skip_list = _format_applescript_list(_resolve_skip_names())
     script = (
         _APPLESCRIPT
@@ -251,14 +377,21 @@ async def get_events(
             log.debug("calendar.skip_bad_line")
             continue
         events.append(event)
+    return events
 
-    # Post-filter the AppleScript output:
-    # 1. macOS Calendar's `whose start date >= startD` returns the *master*
-    #    record for recurring events whose series began in the past. The
-    #    series start date isn't actually an upcoming occurrence — drop it.
-    # 2. Calendar.app sometimes returns both a master record and an
-    #    expanded occurrence with the same date/title — dedupe on
-    #    (starts_at_iso, title, calendar_name).
+
+def _post_process_and_cache(
+    events: list[CalendarEvent],
+    cache_key: tuple[int, int],
+    max_events: int,
+    now: float,
+) -> list[CalendarEvent]:
+    """Drop past-dated rows, dedupe, sort, trim, cache.
+
+    Past-dated filter is a defensive safety net — EventKit handles
+    recurrence properly, but the AppleScript fallback returns the master
+    record of recurring events with the series start date.
+    """
     from datetime import date as _date
     today_iso = _date.today().isoformat()
     events = [e for e in events if e.starts_at_iso[:10] >= today_iso]
