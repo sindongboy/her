@@ -203,6 +203,12 @@ composer.addEventListener("submit", (ev) => {
 });
 
 input.addEventListener("keydown", (ev) => {
+  // Don't submit while an IME composition is in progress (Korean Hangul,
+  // Japanese kana, etc.). Without this guard, Enter triggers submit AND the
+  // IME's finalize, so the just-committed character gets re-inserted into
+  // the cleared textarea. keyCode 229 covers older browsers that don't yet
+  // populate isComposing on the keydown event.
+  if (ev.isComposing || ev.keyCode === 229) return;
   if (ev.key === "Enter" && !ev.shiftKey) {
     ev.preventDefault();
     composer.requestSubmit();
