@@ -665,10 +665,17 @@ async def _handle_message(
     except Exception as exc:
         log.warning("ws.chat.remember_failed", error=str(exc))
 
+    # Run recall + relevance filter ONCE per turn — used both for the WS
+    # sidechannel and as the LLM context inside stream_respond.
+    recall_ctx = None
     try:
-        recall_payload = await _build_recall_payload(agent, store, content, session_id)
+        recall_ctx = await agent.recall_for_turn(content, session_id)
         await websocket.send_text(
-            json.dumps({"type": "recall", "session_id": session_id, **recall_payload})
+            json.dumps({
+                "type": "recall",
+                "session_id": session_id,
+                **_recall_ctx_to_dict(recall_ctx),
+            })
         )
     except Exception as exc:
         log.warning("ws.chat.recall_failed", error=str(exc))
@@ -676,7 +683,10 @@ async def _handle_message(
     try:
         accumulated: list[str] = []
         stream: AsyncIterator[str] = agent.stream_respond(
-            content, session_id=session_id, remembered=remembered
+            content,
+            session_id=session_id,
+            remembered=remembered,
+            recall_ctx=recall_ctx,
         )
         async for chunk in stream:
             accumulated.append(chunk)
@@ -708,13 +718,8 @@ async def _handle_message(
         await _send_error(websocket, f"agent error: {exc}")
 
 
-async def _build_recall_payload(
-    agent: Any, store: Any, content: str, session_id: int
-) -> dict[str, Any]:
-    """Run recall once so the right panel can show what was looked up."""
-    from apps.agent.recall import recall
-
-    ctx = await recall(store, content, agent._gemini, session_id=session_id)
+def _recall_ctx_to_dict(ctx: Any) -> dict[str, Any]:
+    """Serialize a RecallContext for the WS sidechannel."""
     return {
         "facts": [
             {"id": fid, "person_name": pname, "predicate": pred, "object": obj}

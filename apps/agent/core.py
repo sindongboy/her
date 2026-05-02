@@ -22,7 +22,7 @@ import structlog
 from apps.agent.anonymize import Anonymizer
 from apps.agent.gemini import GeminiClient
 from apps.agent.multimodal import parts_from_attachment_refs
-from apps.agent.recall import RecallContext, recall
+from apps.agent.recall import RecallContext, filter_by_relevance, recall
 from apps.agent.world_context import get_world_state_block, init_world_state_cache
 from apps.memory.store import MemoryStore
 from apps.web import Event, EventBus
@@ -196,6 +196,16 @@ class AgentCore:
                 return None
         return self._flash_client
 
+    async def recall_for_turn(
+        self, message: str, session_id: int | None
+    ) -> RecallContext:
+        """Run recall + Flash relevance filter once. Returned context is what
+        will go BOTH to the LLM prompt and to the UI's recall sidechannel,
+        so the user sees exactly what shaped the answer."""
+        ctx = await recall(self.store, message, self._gemini, session_id=session_id)
+        flash = self._get_flash_client()
+        return await filter_by_relevance(ctx, message, flash)
+
     # ── memory write-from-chat ───────────────────────────────────────────
 
     async def maybe_remember(
@@ -345,6 +355,7 @@ class AgentCore:
         *,
         session_id: int | None = None,
         attachments: list[AttachmentRef] | None = None,
+        recall_ctx: RecallContext | None = None,
     ) -> AgentResponse:
         """Full response cycle: recall → LLM → persist → return."""
         sid = await self._ensure_session(session_id)
@@ -354,7 +365,7 @@ class AgentCore:
             attachment_count=len(attachments) if attachments else 0,
         )
 
-        ctx = await recall(self.store, message, self._gemini, session_id=sid)
+        ctx = recall_ctx if recall_ctx is not None else await self.recall_for_turn(message, sid)
 
         system_prompt = _build_system_prompt()
         messages, alias_map = self._build_messages(message, ctx)
@@ -402,12 +413,16 @@ class AgentCore:
         session_id: int | None = None,
         attachments: list[AttachmentRef] | None = None,
         remembered: dict[str, Any] | None = None,
+        recall_ctx: RecallContext | None = None,
     ) -> AsyncIterator[str]:
         """Streaming response. Yields chunks; persists assembled text at end.
 
-        When *remembered* is provided (typically from a prior maybe_remember
-        call), the system prompt is augmented so the model naturally
-        acknowledges the new memory in its reply.
+        When *remembered* is provided (from a prior maybe_remember call), the
+        system prompt is augmented so the model naturally acknowledges the
+        new memory in its reply.
+
+        When *recall_ctx* is provided, we use it directly instead of running
+        recall again — caller (typically the WS handler) has already done it.
         """
         sid = await self._ensure_session(session_id)
         log.info(
@@ -415,9 +430,10 @@ class AgentCore:
             session_id=sid,
             attachment_count=len(attachments) if attachments else 0,
             remembered=bool(remembered),
+            preloaded_ctx=recall_ctx is not None,
         )
 
-        ctx = await recall(self.store, message, self._gemini, session_id=sid)
+        ctx = recall_ctx if recall_ctx is not None else await self.recall_for_turn(message, sid)
 
         self._publish_recall_events(ctx)
 

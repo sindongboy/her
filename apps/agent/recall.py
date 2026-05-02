@@ -1,4 +1,4 @@
-"""Memory recall — sessions/notes/facts/events strategies.
+"""Memory recall + relevance filtering.
 
 Raw SQL by design — see CLAUDE.md §4 module boundaries. Recall directly
 hits store.conn so this module stays decoupled from MemoryStore method
@@ -115,10 +115,19 @@ def _structured_recall(
     store: "MemoryStore",
     message: str,
 ) -> tuple[list[tuple[int, str, str, str]], list[tuple[int, str, str]]]:
+    """Match person names AND relations in *message* (so "딸" surfaces facts
+    about whoever has relation="딸"). Returns (facts, upcoming_events).
+    """
     people = store.list_people()
-    matched_ids: list[int] = [p.id for p in people if p.name and p.name in message]
-    if not matched_ids:
+    matched: dict[int, "Person"] = {}  # type: ignore[name-defined]
+    for p in people:
+        if p.name and p.name in message:
+            matched[p.id] = p
+        elif p.relation and p.relation in message:
+            matched[p.id] = p
+    if not matched:
         return [], []
+    matched_ids = list(matched.keys())
 
     facts: list[tuple[int, str, str, str]] = []
     events: list[tuple[int, str, str]] = []
@@ -295,3 +304,125 @@ def _recent_attachments_for_session(
 
 def _floats_to_bytes(values: list[float]) -> bytes:
     return struct.pack(f"{len(values)}f", *values)
+
+
+# ── Relevance filter (LLM-based) ─────────────────────────────────────────
+
+
+_FILTER_PROMPT = """\
+사용자 질문에 답하기 위해 *직접* 관련된 기억만 골라주세요.
+
+질문: {query}
+
+후보:
+{candidates}
+
+규칙:
+- 질문과 직접 관련된 항목만 keep
+- 인물이 같다는 이유만으로 keep 하지 말 것 (인물의 무관한 사실은 제외)
+- 확신 없으면 제외
+- 첨부된 파일은 항상 모두 keep (사용자가 명시적으로 참조)
+
+응답: 엄격한 JSON. 추가 텍스트 금지.
+스키마: {{"keep_facts":[id...], "keep_events":[id...], "keep_notes":[id...], "keep_sessions":[id...]}}
+"""
+
+
+def _build_filter_prompt(query: str, ctx: RecallContext) -> str:
+    blocks: list[str] = []
+
+    if ctx.facts:
+        lines = [
+            f"- id={fid}: {pname or '?'} — {pred} = {obj}"
+            for fid, pname, pred, obj in ctx.facts
+        ]
+        blocks.append("[FACTS]\n" + "\n".join(lines))
+
+    if ctx.upcoming_events:
+        lines = [f"- id={eid}: {title} ({when})" for eid, title, when in ctx.upcoming_events]
+        blocks.append("[EVENTS]\n" + "\n".join(lines))
+
+    if ctx.notes:
+        lines = [f"- id={nid}: {content}" for nid, content in ctx.notes]
+        blocks.append("[NOTES]\n" + "\n".join(lines))
+
+    if ctx.sessions:
+        lines = [f"- id={sid}: {text or '(빈 요약)'}" for sid, text, _score in ctx.sessions]
+        blocks.append("[SESSIONS]\n" + "\n".join(lines))
+
+    candidates = "\n\n".join(blocks) if blocks else "(없음)"
+    return _FILTER_PROMPT.format(query=query, candidates=candidates)
+
+
+def _strip_json_fence(s: str) -> str:
+    s = s.strip()
+    if s.startswith("```"):
+        s = s.strip("`")
+        if s.lower().startswith("json"):
+            s = s[4:].strip()
+    return s
+
+
+async def filter_by_relevance(
+    ctx: RecallContext,
+    query: str,
+    flash_client: "GeminiClient | None",
+    *,
+    timeout_s: float = 4.0,
+) -> RecallContext:
+    """Use a cheap Flash call to keep only items semantically relevant to *query*.
+
+    Falls open (returns the original ctx unchanged) on:
+      - flash_client is None
+      - empty candidate set (nothing to filter)
+      - parse / API failure
+      - timeout
+
+    Attachments always pass through — the user explicitly referenced them.
+    """
+    import asyncio
+    import json
+
+    if flash_client is None:
+        return ctx
+    if not (ctx.facts or ctx.notes or ctx.upcoming_events or ctx.sessions):
+        return ctx
+
+    prompt = _build_filter_prompt(query, ctx)
+
+    try:
+        raw = await asyncio.wait_for(
+            asyncio.to_thread(
+                flash_client.generate, [{"role": "user", "content": prompt}]
+            ),
+            timeout=timeout_s,
+        )
+    except (asyncio.TimeoutError, Exception) as exc:  # noqa: BLE001
+        log.warning("recall.filter.failed", error=str(exc))
+        return ctx
+
+    try:
+        data = json.loads(_strip_json_fence(raw))
+    except (json.JSONDecodeError, AttributeError, TypeError) as exc:
+        log.warning("recall.filter.parse_failed", error=str(exc), raw=str(raw)[:200])
+        return ctx
+
+    keep_facts    = set(int(x) for x in (data.get("keep_facts") or []) if isinstance(x, (int, float, str)))
+    keep_events   = set(int(x) for x in (data.get("keep_events") or []) if isinstance(x, (int, float, str)))
+    keep_notes    = set(int(x) for x in (data.get("keep_notes") or []) if isinstance(x, (int, float, str)))
+    keep_sessions = set(int(x) for x in (data.get("keep_sessions") or []) if isinstance(x, (int, float, str)))
+
+    filtered = RecallContext(
+        sessions=[s for s in ctx.sessions if s[0] in keep_sessions],
+        facts=[f for f in ctx.facts if f[0] in keep_facts],
+        upcoming_events=[e for e in ctx.upcoming_events if e[0] in keep_events],
+        notes=[n for n in ctx.notes if n[0] in keep_notes],
+        attachments=ctx.attachments,
+        attachment_ids=ctx.attachment_ids,
+    )
+    log.info(
+        "recall.filter.applied",
+        before=(len(ctx.facts), len(ctx.upcoming_events), len(ctx.notes), len(ctx.sessions)),
+        after=(len(filtered.facts), len(filtered.upcoming_events), len(filtered.notes), len(filtered.sessions)),
+    )
+    return filtered

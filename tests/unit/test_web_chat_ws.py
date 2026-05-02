@@ -29,6 +29,10 @@ class FakeAgent:
         self._gemini = FakeGemini()
         self.calls: list[dict[str, Any]] = []
 
+    async def recall_for_turn(self, message: str, session_id: int | None):
+        from apps.agent.recall import RecallContext
+        return RecallContext()
+
     async def stream_respond(  # type: ignore[override]
         self, message: str, *, session_id: int | None = None, **_: Any
     ):
