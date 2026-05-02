@@ -226,6 +226,10 @@ if (welcomeEl) {
 }
 
 on("sessionId", (sid) => {
+  // Don't reload mid-turn. The first token of a brand-new session sets the
+  // sessionId so subsequent turns reuse it; reloading at that moment would
+  // race with _persist_turn and duplicate the streaming assistant bubble.
+  if (pendingTurn) return;
   loadSessionMessages(sid);
 });
 
