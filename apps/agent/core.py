@@ -85,16 +85,12 @@ class AgentResponse:
 
 
 # Trigger phrases that mean "user wants me to remember something".
-# Matched as case-insensitive substrings on the user message.
+# Matched as case-insensitive substrings — note that "기억해" alone is
+# enough since it is also a substring of "기억해줘" / "기억해둬" /
+# "기억해 주세요" etc. Same for "메모해".
 _REMEMBER_TRIGGERS: tuple[str, ...] = (
-    "기억해줘",
-    "기억해 둬",
-    "기억해둬",
-    "기억해 주세요",
-    "기억해주세요",
-    "메모해줘",
-    "메모해둬",
-    "메모해 주세요",
+    "기억해",
+    "메모해",
     "잊지마",
     "잊지 마",
     "잊지말",
@@ -302,14 +298,40 @@ class AgentCore:
         return {"facts": added_facts, "notes": added_notes}
 
     def _resolve_or_create_person(self, name: str) -> int | None:
-        if not name.strip():
+        """Resolve a literal subject string ("딸", "신유하", "Mom") to a
+        Person id. Order:
+          1) exact name match (case-insensitive)
+          2) relation match — so "딸" resolves to whoever has relation="딸"
+          3) substring match either way — handles partial mentions
+          4) create a new person as last resort
+        """
+        n = name.strip()
+        if not n:
             return None
-        for p in self.store.list_people():
-            if p.name == name:
+        n_low = n.lower()
+        people = self.store.list_people()
+
+        # 1) exact name
+        for p in people:
+            if p.name and p.name.lower() == n_low:
                 return p.id
-        # Auto-create — user explicitly asked us to remember something about
-        # this person, so we own the new row.
-        return self.store.add_person(name=name)
+
+        # 2) relation
+        for p in people:
+            if p.relation and p.relation.lower() == n_low:
+                return p.id
+
+        # 3) substring either direction (single match only — ambiguous → skip)
+        subs = [
+            p for p in people
+            if (p.name and (n_low in p.name.lower() or p.name.lower() in n_low))
+            or (p.relation and (n_low in p.relation.lower() or p.relation.lower() in n_low))
+        ]
+        if len(subs) == 1:
+            return subs[0].id
+
+        # 4) auto-create — user explicitly asked us to remember about this name
+        return self.store.add_person(name=n)
 
     def _person_name(self, person_id: int) -> str | None:
         p = self.store.get_person(person_id)
