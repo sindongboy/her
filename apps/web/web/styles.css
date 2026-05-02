@@ -554,6 +554,45 @@ ul { list-style: none; margin: 0; padding: 0; }
   display: none; /* keep messages clean — alignment alone signals role */
 }
 
+/* Inline thinking indicator while waiting for the first token */
+.message.thinking {
+  align-self: flex-start;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 14px;
+  background: var(--bg-elevated);
+  border-color: var(--line);
+  color: var(--text-dim);
+  font-size: 12.5px;
+  font-style: italic;
+}
+
+.thinking-dots {
+  display: inline-flex;
+  gap: 3px;
+  align-items: center;
+}
+
+.thinking-dots span {
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: var(--accent);
+  opacity: 0.4;
+  animation: thinking-pulse 1.2s ease-in-out infinite;
+}
+
+.thinking-dots span:nth-child(2) { animation-delay: 0.15s; }
+.thinking-dots span:nth-child(3) { animation-delay: 0.30s; }
+
+@keyframes thinking-pulse {
+  0%, 80%, 100% { transform: scale(0.7); opacity: 0.35; }
+  40%           { transform: scale(1.0); opacity: 1.0;  }
+}
+
+.thinking-label { letter-spacing: 0.1px; }
+
 .message code {
   font-family: var(--font-mono);
   font-size: 12.5px;

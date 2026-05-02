@@ -11,6 +11,7 @@ const welcomeEl = document.getElementById("welcome");
 
 let socket = null;
 let currentAssistant = null; // DOM node accumulating tokens
+let thinkingEl = null;       // inline "Her is thinking" placeholder
 let pendingTurn = false;
 
 function showWelcome() {
@@ -24,6 +25,28 @@ function hideWelcome() {
 function setStatus(label, mode) {
   statusText.textContent = label;
   orb.className = `orb ${mode || "idle"}`;
+}
+
+function showThinking(label) {
+  hideWelcome();
+  if (!thinkingEl) {
+    thinkingEl = document.createElement("article");
+    thinkingEl.className = "message thinking";
+    thinkingEl.innerHTML = `
+      <span class="thinking-dots" aria-hidden="true"><span></span><span></span><span></span></span>
+      <span class="thinking-label"></span>
+    `;
+    messagesEl.append(thinkingEl);
+  }
+  thinkingEl.querySelector(".thinking-label").textContent = label;
+  messagesEl.scrollTop = messagesEl.scrollHeight;
+}
+
+function hideThinking() {
+  if (thinkingEl) {
+    thinkingEl.remove();
+    thinkingEl = null;
+  }
 }
 
 function renderMessage(role, content) {
@@ -98,32 +121,48 @@ function connect() {
         // schema_version handshake; ignored for now.
         break;
 
-      case "recall":
+      case "recall": {
+        const counts =
+          (msg.facts?.length || 0) +
+          (msg.notes?.length || 0) +
+          (msg.events?.length || 0) +
+          (msg.sessions?.length || 0);
+        showThinking(
+          counts > 0
+            ? `${counts}개 기억 떠올림 — 생각 중`
+            : "생각 중",
+        );
+        setStatus("생각 중", "thinking");
         document.dispatchEvent(
           new CustomEvent("her:recall", { detail: msg }),
         );
         break;
+      }
 
       case "token":
         if (msg.session_id && msg.session_id !== state.sessionId) {
           set("sessionId", msg.session_id);
         }
         if (!currentAssistant) {
+          hideThinking();
           currentAssistant = renderMessage("assistant", "");
+          setStatus("답하는 중", "thinking");
         }
         currentAssistant.textContent += msg.text || "";
         messagesEl.scrollTop = messagesEl.scrollHeight;
         break;
 
       case "done":
+        hideThinking();
         currentAssistant = null;
         pendingTurn = false;
         sendBtn.disabled = false;
-        setStatus("준비 완료", "idle");
+        setStatus("준비됨", "idle");
         document.dispatchEvent(new CustomEvent("her:turn-complete"));
         break;
 
       case "error":
+        hideThinking();
         renderError(msg.message || "알 수 없는 오류");
         currentAssistant = null;
         pendingTurn = false;
@@ -141,8 +180,9 @@ function sendMessage(content) {
   }
   pendingTurn = true;
   sendBtn.disabled = true;
-  setStatus("생각 중", "thinking");
   renderMessage("user", content);
+  showThinking("기억을 살펴보는 중");
+  setStatus("기억 검색 중", "thinking");
   socket.send(
     JSON.stringify({
       type: "message",
