@@ -1402,3 +1402,26 @@ body.mm-open { overflow: hidden; }
 .probe-list .probe-item.fact .pred { color: var(--text-dim); }
 .probe-list .probe-item.fact .arrow { color: var(--text-faint); margin: 0 4px; }
 .probe-list .probe-item.fact .obj { color: var(--text); }
+
+/* Calendar widget settings toolbar */
+.widget-calendar .widget-body { padding: 6px; }
+.cal-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  padding: 4px 6px 8px;
+  font-size: 11px;
+  color: var(--text-faint);
+}
+.cal-toolbar label { display: inline-flex; align-items: center; gap: 4px; }
+.cal-max-select {
+  background: var(--bg-base);
+  border: 1px solid var(--line-strong);
+  color: var(--text);
+  border-radius: 4px;
+  padding: 1px 4px;
+  font-size: 11px;
+  font-family: var(--font-mono);
+  outline: none;
+}
+.cal-max-select:focus { border-color: var(--accent-line); }

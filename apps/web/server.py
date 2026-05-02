@@ -475,7 +475,9 @@ def create_app(
             log.warning("widget.calendar.db_query_failed", error=str(exc))
 
         merged.sort(key=lambda e: e["when_at"] or "")
-        return merged[:30]
+        # Return up to 100 — the calendar widget slices client-side based on
+        # its per-instance max_events setting.
+        return merged[:100]
 
     @app.get("/api/widgets/stocks")
     async def widget_stocks(request: Request, tickers: str = "") -> Any:
