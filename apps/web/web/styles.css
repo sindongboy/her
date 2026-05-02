@@ -1343,3 +1343,45 @@ body.mm-open { overflow: hidden; }
 }
 .mm-event-main .when { color: var(--c-event); font-variant-numeric: tabular-nums; }
 .mm-event-main .type { color: var(--text-dim); }
+
+/* Memory-added confirmation card (chat surface) */
+.message.memory-added {
+  align-self: flex-start;
+  max-width: 720px;
+  background: rgba(139, 140, 246, 0.08);
+  border: 1px solid var(--accent-line);
+  color: var(--text);
+  padding: 10px 14px;
+  font-size: 12.5px;
+}
+.message.memory-added .ma-head {
+  font-weight: 600;
+  font-size: 11.5px;
+  letter-spacing: 0.3px;
+  color: var(--accent);
+  margin-bottom: 6px;
+}
+.message.memory-added .ma-list {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.message.memory-added .ma-item {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+}
+.message.memory-added .ma-kind {
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.4px;
+  text-transform: uppercase;
+  padding: 1px 6px;
+  border-radius: 999px;
+  flex: 0 0 auto;
+  margin-top: 2px;
+}
+.message.memory-added .ma-kind.fact { color: var(--c-fact); background: var(--c-fact-bg); }
+.message.memory-added .ma-kind.note { color: var(--c-note); background: var(--c-note-bg); }
+.message.memory-added .ma-text { color: var(--text); }
+.message.memory-added .ma-text b { color: var(--accent); font-weight: 600; }

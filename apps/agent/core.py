@@ -84,6 +84,49 @@ class AgentResponse:
     used_attachment_ids: list[int] = field(default_factory=list)
 
 
+# Trigger phrases that mean "user wants me to remember something".
+# Matched as case-insensitive substrings on the user message.
+_REMEMBER_TRIGGERS: tuple[str, ...] = (
+    "기억해줘",
+    "기억해 둬",
+    "기억해둬",
+    "기억해 주세요",
+    "기억해주세요",
+    "메모해줘",
+    "메모해둬",
+    "메모해 주세요",
+    "잊지마",
+    "잊지 마",
+    "잊지말",
+    "remember this",
+    "remember that",
+    "make a note",
+    "note this",
+    "save this",
+)
+
+
+def _looks_like_remember_request(msg: str) -> bool:
+    lower = msg.lower()
+    return any(t in lower for t in _REMEMBER_TRIGGERS)
+
+
+_REMEMBER_PROMPT = """\
+다음 메시지에서 비서가 영구 기억으로 저장해야 할 항목을 추출하세요.
+
+메시지: {message}
+
+규칙:
+- 사실(fact)은 특정 사람에 대한 안정적인 진술입니다 (subject_person_name + predicate + object).
+- 메모(note)는 사람에 매이지 않은 일반 정보·할일·결정 사항입니다.
+- 메시지에 "기억해줘" 류의 메타 표현은 추출에서 제외합니다 (저장할 알맹이만).
+- 추론·추측 금지. 명시적으로 언급된 것만.
+
+응답은 엄격한 JSON. 추가 텍스트 금지.
+스키마: {{"facts": [{{"subject_person_name": "...", "predicate": "...", "object": "...", "confidence": 0..1}}], "notes": [{{"content": "...", "tags": ["..."]}}]}}
+"""
+
+
 class AgentCore:
     """Orchestrates recall → anonymize → LLM → de-anonymize → persist.
 
@@ -138,6 +181,139 @@ class AgentCore:
             getattr(settings, "enable_search_grounding", True)
         )
         self._world_state_cache = init_world_state_cache(settings)
+
+        # Lightweight Flash client for cheap structured extractions
+        # (e.g. "기억해줘" intent extraction). Lazy — only built when used.
+        self._flash_client: GeminiClient | None = None
+        self._flash_api_key = api_key
+
+    def _get_flash_client(self) -> GeminiClient | None:
+        """Cheap Flash model for one-shot structured extractions."""
+        if self._flash_client is None:
+            try:
+                self._flash_client = GeminiClient(
+                    model_id="gemini-2.5-flash",
+                    api_key=self._flash_api_key,
+                )
+            except Exception as exc:
+                log.warning("agent.flash_init_failed", error=str(exc))
+                return None
+        return self._flash_client
+
+    # ── memory write-from-chat ───────────────────────────────────────────
+
+    async def maybe_remember(
+        self, message: str, session_id: int | None
+    ) -> dict[str, Any] | None:
+        """If the user message looks like a remember-this request, extract
+        structured facts/notes via Flash and persist them. Returns a dict
+        with the items added (for the WS sidechannel + system prompt) or
+        None when no extraction occurred.
+        """
+        if not _looks_like_remember_request(message):
+            return None
+
+        flash = self._get_flash_client()
+        if flash is None:
+            return None
+
+        prompt = _REMEMBER_PROMPT.format(message=message)
+        try:
+            raw = await asyncio.to_thread(
+                flash.generate, [{"role": "user", "content": prompt}]
+            )
+        except Exception as exc:
+            log.warning("agent.remember.extract_failed", error=str(exc))
+            return None
+
+        import json
+
+        try:
+            stripped = raw.strip()
+            # Strip ```json fences if Flash wraps JSON in code fences
+            if stripped.startswith("```"):
+                stripped = stripped.strip("`")
+                if stripped.lower().startswith("json"):
+                    stripped = stripped[4:].strip()
+            data = json.loads(stripped)
+        except (json.JSONDecodeError, AttributeError) as exc:
+            log.warning("agent.remember.parse_failed", error=str(exc), raw=raw[:200])
+            return None
+
+        added_facts: list[dict[str, Any]] = []
+        added_notes: list[dict[str, Any]] = []
+
+        for f in data.get("facts") or []:
+            name = (f.get("subject_person_name") or "").strip()
+            predicate = (f.get("predicate") or "").strip()
+            obj = (f.get("object") or "").strip()
+            if not predicate or not obj:
+                continue
+            try:
+                confidence = float(f.get("confidence", 1.0))
+            except (TypeError, ValueError):
+                confidence = 1.0
+            confidence = max(0.0, min(1.0, confidence))
+
+            person_id = self._resolve_or_create_person(name) if name else None
+            if person_id is None:
+                # No subject → demote to note.
+                content = f"{predicate}: {obj}" if name == "" else f"{name} — {predicate}: {obj}"
+                nid = self.store.add_note(content=content, source_session_id=session_id)
+                added_notes.append({"id": nid, "content": content, "tags": []})
+                continue
+            fid = self.store.add_fact(
+                person_id, predicate, obj,
+                confidence=confidence,
+                source_session_id=session_id,
+            )
+            added_facts.append({
+                "id": fid,
+                "person_id": person_id,
+                "person_name": self._person_name(person_id),
+                "predicate": predicate,
+                "object": obj,
+                "confidence": confidence,
+            })
+
+        for n in data.get("notes") or []:
+            content = (n.get("content") or "").strip()
+            if not content:
+                continue
+            tags = n.get("tags") or []
+            if not isinstance(tags, list):
+                tags = []
+            nid = self.store.add_note(
+                content=content,
+                tags=[str(t) for t in tags],
+                source_session_id=session_id,
+            )
+            added_notes.append({"id": nid, "content": content, "tags": [str(t) for t in tags]})
+
+        if not (added_facts or added_notes):
+            return None
+
+        log.info(
+            "agent.remember.persisted",
+            session_id=session_id,
+            facts=len(added_facts),
+            notes=len(added_notes),
+        )
+        return {"facts": added_facts, "notes": added_notes}
+
+    def _resolve_or_create_person(self, name: str) -> int | None:
+        if not name.strip():
+            return None
+        for p in self.store.list_people():
+            if p.name == name:
+                return p.id
+        # Auto-create — user explicitly asked us to remember something about
+        # this person, so we own the new row.
+        return self.store.add_person(name=name)
+
+    def _person_name(self, person_id: int) -> str | None:
+        p = self.store.get_person(person_id)
+        return p.name if p else None
 
     # ── public API ───────────────────────────────────────────────────────
 
@@ -203,13 +379,20 @@ class AgentCore:
         *,
         session_id: int | None = None,
         attachments: list[AttachmentRef] | None = None,
+        remembered: dict[str, Any] | None = None,
     ) -> AsyncIterator[str]:
-        """Streaming response. Yields chunks; persists assembled text at end."""
+        """Streaming response. Yields chunks; persists assembled text at end.
+
+        When *remembered* is provided (typically from a prior maybe_remember
+        call), the system prompt is augmented so the model naturally
+        acknowledges the new memory in its reply.
+        """
         sid = await self._ensure_session(session_id)
         log.info(
             "agent.stream.start",
             session_id=sid,
             attachment_count=len(attachments) if attachments else 0,
+            remembered=bool(remembered),
         )
 
         ctx = await recall(self.store, message, self._gemini, session_id=sid)
@@ -217,6 +400,8 @@ class AgentCore:
         self._publish_recall_events(ctx)
 
         system_prompt = _build_system_prompt()
+        if remembered:
+            system_prompt += "\n\n" + _format_remembered_addon(remembered)
         messages, alias_map = self._build_messages(message, ctx)
 
         extra_parts = parts_from_attachment_refs(attachments) if attachments else []
@@ -460,6 +645,21 @@ def _load_persona() -> str:
 def _build_system_prompt() -> str:
     base = _load_persona()
     return base + get_world_state_block()
+
+
+def _format_remembered_addon(remembered: dict[str, Any]) -> str:
+    """Format a system-prompt note that tells the LLM what just got saved.
+
+    The reply should reference these naturally so the user sees confirmation.
+    """
+    lines: list[str] = ["[메모리 갱신] 사용자의 요청에 따라 다음을 방금 저장했어요:"]
+    for f in remembered.get("facts") or []:
+        person = f.get("person_name") or "(사람)"
+        lines.append(f"- 사실: {person} — {f.get('predicate')} = {f.get('object')}")
+    for n in remembered.get("notes") or []:
+        lines.append(f"- 메모: {n.get('content')}")
+    lines.append("응답에서 이 내용을 짧고 자연스럽게 확인해 주세요.")
+    return "\n".join(lines)
 
 
 def _format_recall_context(ctx: RecallContext) -> str:

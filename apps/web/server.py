@@ -646,6 +646,23 @@ async def _handle_message(
 
     log.info("ws.chat.turn.start", session_id=session_id, chars=len(content))
 
+    # First: detect "기억해줘" intent and persist before recall, so the just-
+    # added items can show up in the recall sidechannel.
+    remembered: dict[str, Any] | None = None
+    try:
+        if hasattr(agent, "maybe_remember"):
+            remembered = await agent.maybe_remember(content, session_id)
+            if remembered:
+                await websocket.send_text(
+                    json.dumps({
+                        "type": "memory_added",
+                        "session_id": session_id,
+                        **remembered,
+                    })
+                )
+    except Exception as exc:
+        log.warning("ws.chat.remember_failed", error=str(exc))
+
     try:
         recall_payload = await _build_recall_payload(agent, store, content, session_id)
         await websocket.send_text(
@@ -657,7 +674,7 @@ async def _handle_message(
     try:
         accumulated: list[str] = []
         stream: AsyncIterator[str] = agent.stream_respond(
-            content, session_id=session_id
+            content, session_id=session_id, remembered=remembered
         )
         async for chunk in stream:
             accumulated.append(chunk)

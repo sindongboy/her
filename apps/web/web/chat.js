@@ -49,6 +49,48 @@ function hideThinking() {
   }
 }
 
+function renderMemoryAdded(detail) {
+  hideWelcome();
+  const el = document.createElement("article");
+  el.className = "message memory-added";
+  const facts = detail.facts || [];
+  const notes = detail.notes || [];
+  const parts = [];
+  if (facts.length) {
+    parts.push(
+      ...facts.map(
+        (f) =>
+          `<div class="ma-item"><span class="ma-kind fact">사실</span><span class="ma-text">${
+            f.person_name ? `<b>${escapeHTML(f.person_name)}</b> — ` : ""
+          }${escapeHTML(f.predicate)} = ${escapeHTML(f.object)}</span></div>`,
+      ),
+    );
+  }
+  if (notes.length) {
+    parts.push(
+      ...notes.map(
+        (n) =>
+          `<div class="ma-item"><span class="ma-kind note">메모</span><span class="ma-text">${escapeHTML(n.content)}</span></div>`,
+      ),
+    );
+  }
+  el.innerHTML = `
+    <div class="ma-head">✓ 기억에 추가했어요</div>
+    <div class="ma-list">${parts.join("")}</div>
+  `;
+  messagesEl.append(el);
+  messagesEl.scrollTop = messagesEl.scrollHeight;
+}
+
+function escapeHTML(s) {
+  return String(s ?? "")
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
+}
+
 function renderMessage(role, content) {
   hideWelcome();
   const el = document.createElement("article");
@@ -120,6 +162,14 @@ function connect() {
       case "hello":
         // schema_version handshake; ignored for now.
         break;
+
+      case "memory_added": {
+        renderMemoryAdded(msg);
+        document.dispatchEvent(
+          new CustomEvent("her:memory-added", { detail: msg }),
+        );
+        break;
+      }
 
       case "recall": {
         const counts =
