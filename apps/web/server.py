@@ -160,54 +160,251 @@ def create_app(
         store.archive_session(session_id)
         return {"ok": True}
 
+    # ── Notes CRUD ────────────────────────────────────────────────────────
+
     @app.get("/api/memory/notes")
-    async def list_memory_notes(request: Request) -> Any:
+    async def list_memory_notes(request: Request, include_archived: bool = False) -> Any:
         _require_loopback(request)
-        notes = store.list_notes()
-        return [
-            {
-                "id": n.id,
-                "content": n.content,
-                "tags": n.tags,
-                "created_at": n.created_at,
-                "updated_at": n.updated_at,
-            }
-            for n in notes
-        ]
+        notes = store.list_notes(include_archived=include_archived)
+        return [_note_dict(n) for n in notes]
+
+    @app.post("/api/memory/notes")
+    async def create_memory_note(request: Request) -> Any:
+        _require_loopback(request)
+        body = await request.json()
+        content = (body.get("content") or "").strip()
+        if not content:
+            raise HTTPException(status_code=400, detail="content required")
+        tags = body.get("tags") or []
+        if not isinstance(tags, list):
+            raise HTTPException(status_code=400, detail="tags must be a list")
+        note_id = store.add_note(content=content, tags=[str(t) for t in tags])
+        return {"id": note_id}
+
+    @app.patch("/api/memory/notes/{note_id}")
+    async def update_memory_note(note_id: int, request: Request) -> Any:
+        _require_loopback(request)
+        body = await request.json()
+        content = body.get("content")
+        tags = body.get("tags")
+        if content is None and tags is None:
+            raise HTTPException(status_code=400, detail="nothing to update")
+        store.update_note(
+            note_id,
+            content=(content.strip() if isinstance(content, str) else None),
+            tags=[str(t) for t in tags] if isinstance(tags, list) else None,
+        )
+        return {"ok": True}
+
+    @app.delete("/api/memory/notes/{note_id}")
+    async def archive_memory_note(note_id: int, request: Request) -> Any:
+        _require_loopback(request)
+        store.archive_note(note_id)
+        return {"ok": True}
+
+    @app.post("/api/memory/notes/{note_id}/restore")
+    async def restore_memory_note(note_id: int, request: Request) -> Any:
+        _require_loopback(request)
+        store.conn.execute(
+            "UPDATE notes SET archived_at = NULL WHERE id = ?", (note_id,)
+        )
+        return {"ok": True}
+
+    # ── People CRUD ───────────────────────────────────────────────────────
 
     @app.get("/api/memory/people")
-    async def list_memory_people(request: Request) -> Any:
+    async def list_memory_people(request: Request, include_archived: bool = False) -> Any:
         _require_loopback(request)
-        return [
-            {
-                "id": p.id,
-                "name": p.name,
-                "relation": p.relation,
-                "birthday": p.birthday,
-            }
-            for p in store.list_people()
-        ]
+        return [_person_dict(p) for p in store.list_people(include_archived=include_archived)]
+
+    @app.post("/api/memory/people")
+    async def create_memory_person(request: Request) -> Any:
+        _require_loopback(request)
+        body = await request.json()
+        name = (body.get("name") or "").strip()
+        if not name:
+            raise HTTPException(status_code=400, detail="name required")
+        person_id = store.add_person(
+            name=name,
+            relation=body.get("relation") or None,
+            birthday=body.get("birthday") or None,
+        )
+        return {"id": person_id}
+
+    @app.patch("/api/memory/people/{person_id}")
+    async def update_memory_person(person_id: int, request: Request) -> Any:
+        _require_loopback(request)
+        if store.get_person(person_id) is None:
+            raise HTTPException(status_code=404, detail="person not found")
+        body = await request.json()
+        store.update_person(
+            person_id,
+            name=body.get("name"),
+            relation=body.get("relation"),
+            birthday=body.get("birthday"),
+        )
+        return {"ok": True}
+
+    @app.delete("/api/memory/people/{person_id}")
+    async def archive_memory_person(person_id: int, request: Request) -> Any:
+        _require_loopback(request)
+        if store.get_person(person_id) is None:
+            raise HTTPException(status_code=404, detail="person not found")
+        store.archive_person(person_id)
+        return {"ok": True}
+
+    @app.post("/api/memory/people/{person_id}/restore")
+    async def restore_memory_person(person_id: int, request: Request) -> Any:
+        _require_loopback(request)
+        store.restore_person(person_id)
+        return {"ok": True}
+
+    # ── Facts CRUD ────────────────────────────────────────────────────────
 
     @app.get("/api/memory/facts")
-    async def list_memory_facts(request: Request) -> Any:
+    async def list_memory_facts(request: Request, include_archived: bool = False) -> Any:
         _require_loopback(request)
-        rows = store.conn.execute(
-            "SELECT f.id AS id, f.predicate, f.object, f.confidence, "
-            "       p.name AS person_name "
-            "FROM facts f LEFT JOIN people p ON p.id = f.subject_person_id "
-            "WHERE f.archived_at IS NULL "
-            "ORDER BY f.valid_from DESC LIMIT 200"
-        ).fetchall()
+        if include_archived:
+            sql = (
+                "SELECT f.id, f.predicate, f.object, f.confidence, "
+                "       f.archived_at, f.subject_person_id, "
+                "       f.source_session_id, f.valid_from, "
+                "       p.name AS person_name "
+                "FROM facts f LEFT JOIN people p ON p.id = f.subject_person_id "
+                "ORDER BY f.valid_from DESC LIMIT 500"
+            )
+        else:
+            sql = (
+                "SELECT f.id, f.predicate, f.object, f.confidence, "
+                "       f.archived_at, f.subject_person_id, "
+                "       f.source_session_id, f.valid_from, "
+                "       p.name AS person_name "
+                "FROM facts f LEFT JOIN people p ON p.id = f.subject_person_id "
+                "WHERE f.archived_at IS NULL "
+                "ORDER BY f.valid_from DESC LIMIT 500"
+            )
+        rows = store.conn.execute(sql).fetchall()
         return [
             {
                 "id": r["id"],
+                "subject_person_id": r["subject_person_id"],
+                "person_name": r["person_name"],
                 "predicate": r["predicate"],
                 "object": r["object"],
                 "confidence": r["confidence"],
-                "person_name": r["person_name"],
+                "source_session_id": r["source_session_id"],
+                "valid_from": r["valid_from"],
+                "archived_at": r["archived_at"],
             }
             for r in rows
         ]
+
+    @app.post("/api/memory/facts")
+    async def create_memory_fact(request: Request) -> Any:
+        _require_loopback(request)
+        body = await request.json()
+        person_id = body.get("subject_person_id")
+        predicate = (body.get("predicate") or "").strip()
+        obj = (body.get("object") or "").strip()
+        if not person_id or not predicate or not obj:
+            raise HTTPException(status_code=400, detail="subject_person_id, predicate, object required")
+        confidence = float(body.get("confidence", 1.0))
+        if not (0.0 <= confidence <= 1.0):
+            raise HTTPException(status_code=400, detail="confidence must be 0..1")
+        fact_id = store.add_fact(
+            int(person_id), predicate, obj,
+            confidence=confidence,
+            source_session_id=body.get("source_session_id"),
+        )
+        return {"id": fact_id}
+
+    @app.patch("/api/memory/facts/{fact_id}")
+    async def update_memory_fact(fact_id: int, request: Request) -> Any:
+        _require_loopback(request)
+        if store.get_fact(fact_id) is None:
+            raise HTTPException(status_code=404, detail="fact not found")
+        body = await request.json()
+        try:
+            store.update_fact(
+                fact_id,
+                predicate=body.get("predicate"),
+                object=body.get("object"),
+                confidence=body.get("confidence"),
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc))
+        return {"ok": True}
+
+    @app.delete("/api/memory/facts/{fact_id}")
+    async def archive_memory_fact(fact_id: int, request: Request) -> Any:
+        _require_loopback(request)
+        if store.get_fact(fact_id) is None:
+            raise HTTPException(status_code=404, detail="fact not found")
+        store.archive_fact(fact_id)
+        return {"ok": True}
+
+    @app.post("/api/memory/facts/{fact_id}/restore")
+    async def restore_memory_fact(fact_id: int, request: Request) -> Any:
+        _require_loopback(request)
+        store.restore_fact(fact_id)
+        return {"ok": True}
+
+    # ── Events CRUD ───────────────────────────────────────────────────────
+
+    @app.get("/api/memory/events")
+    async def list_memory_events(request: Request, include_archived: bool = False) -> Any:
+        _require_loopback(request)
+        events = store.list_all_events(include_archived=include_archived)
+        return [_event_dict(e) for e in events]
+
+    @app.post("/api/memory/events")
+    async def create_memory_event(request: Request) -> Any:
+        _require_loopback(request)
+        body = await request.json()
+        title = (body.get("title") or "").strip()
+        ev_type = (body.get("type") or "").strip()
+        when_at = (body.get("when_at") or "").strip()
+        if not title or not ev_type or not when_at:
+            raise HTTPException(status_code=400, detail="type, title, when_at required")
+        event_id = store.add_event(
+            type=ev_type,
+            title=title,
+            when_at=when_at,
+            person_id=body.get("person_id"),
+            recurrence=body.get("recurrence") or None,
+            source=body.get("source") or "user",
+        )
+        return {"id": event_id}
+
+    @app.patch("/api/memory/events/{event_id}")
+    async def update_memory_event(event_id: int, request: Request) -> Any:
+        _require_loopback(request)
+        if store.get_event(event_id) is None:
+            raise HTTPException(status_code=404, detail="event not found")
+        body = await request.json()
+        store.update_event(
+            event_id,
+            type=body.get("type"),
+            title=body.get("title"),
+            when_at=body.get("when_at"),
+            recurrence=body.get("recurrence"),
+            person_id=body.get("person_id"),
+        )
+        return {"ok": True}
+
+    @app.delete("/api/memory/events/{event_id}")
+    async def archive_memory_event(event_id: int, request: Request) -> Any:
+        _require_loopback(request)
+        if store.get_event(event_id) is None:
+            raise HTTPException(status_code=404, detail="event not found")
+        store.archive_event(event_id)
+        return {"ok": True}
+
+    @app.post("/api/memory/events/{event_id}/restore")
+    async def restore_memory_event(event_id: int, request: Request) -> Any:
+        _require_loopback(request)
+        store.restore_event(event_id)
+        return {"ok": True}
 
     # ── /api/widgets/* ────────────────────────────────────────────────────
 
@@ -384,6 +581,43 @@ def _require_loopback(request: Request) -> None:
     host = request.client.host if request.client else ""
     if not _is_loopback(host):
         raise HTTPException(status_code=403, detail="loopback only")
+
+
+def _note_dict(n: Any) -> dict[str, Any]:
+    return {
+        "id": n.id,
+        "content": n.content,
+        "tags": n.tags,
+        "source_session_id": n.source_session_id,
+        "created_at": n.created_at,
+        "updated_at": n.updated_at,
+        "archived_at": n.archived_at,
+    }
+
+
+def _person_dict(p: Any) -> dict[str, Any]:
+    return {
+        "id": p.id,
+        "name": p.name,
+        "relation": p.relation,
+        "birthday": p.birthday,
+        "preferences": p.preferences,
+        "archived_at": p.archived_at,
+    }
+
+
+def _event_dict(e: Any) -> dict[str, Any]:
+    return {
+        "id": e.id,
+        "person_id": e.person_id,
+        "type": e.type,
+        "title": e.title,
+        "when_at": e.when_at,
+        "recurrence": e.recurrence,
+        "source": e.source,
+        "status": e.status,
+        "archived_at": e.archived_at,
+    }
 
 
 async def _send_error(websocket: WebSocket, message: str) -> None:

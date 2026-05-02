@@ -24,6 +24,7 @@ def _person(pid: int, name: str) -> Person:
         preferences={},
         created_at="2026-01-01",
         updated_at="2026-01-01",
+        archived_at=None,
     )
 
 

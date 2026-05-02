@@ -13,9 +13,11 @@ CREATE TABLE IF NOT EXISTS people (
     birthday          TEXT,
     preferences_json  TEXT NOT NULL DEFAULT '{}',
     created_at        TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    updated_at        TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+    updated_at        TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    archived_at       TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_people_relation ON people(relation);
+CREATE INDEX IF NOT EXISTS idx_people_active   ON people(archived_at) WHERE archived_at IS NULL;
 
 -- Sessions: one chat session in the web UI. Replaces v1 "episodes".
 CREATE TABLE IF NOT EXISTS sessions (
@@ -49,10 +51,12 @@ CREATE TABLE IF NOT EXISTS events (
     when_at     TEXT NOT NULL,
     recurrence  TEXT,
     source      TEXT,
-    status      TEXT NOT NULL DEFAULT 'pending'
+    status      TEXT NOT NULL DEFAULT 'pending',
+    archived_at TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_events_when_at ON events(when_at);
 CREATE INDEX IF NOT EXISTS idx_events_person  ON events(person_id);
+CREATE INDEX IF NOT EXISTS idx_events_active  ON events(archived_at) WHERE archived_at IS NULL;
 
 -- Facts: structured assertions with provenance. Conflicts archive, never delete.
 CREATE TABLE IF NOT EXISTS facts (

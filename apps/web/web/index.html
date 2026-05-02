@@ -14,9 +14,15 @@
           <span class="brand-divider" aria-hidden="true"></span>
           <span class="tagline" id="session-title">새 대화</span>
         </div>
-        <div class="status-pill">
-          <span id="orb" class="orb idle" aria-hidden="true"></span>
-          <span id="status-text" class="status-text">준비됨</span>
+        <div class="topbar-actions">
+          <button id="memory-btn" type="button" class="topbar-btn" title="기억 관리">
+            <span class="icon" data-icon="brain" aria-hidden="true"></span>
+            <span>기억</span>
+          </button>
+          <div class="status-pill">
+            <span id="orb" class="orb idle" aria-hidden="true"></span>
+            <span id="status-text" class="status-text">준비됨</span>
+          </div>
         </div>
       </header>
 
@@ -71,5 +77,6 @@
     <script type="module" src="/static/topbar.js"></script>
     <script type="module" src="/static/chat.js"></script>
     <script type="module" src="/static/widgets/main.js"></script>
+    <script type="module" src="/static/memory-modal.js"></script>
   </body>
 </html>

@@ -43,6 +43,7 @@ class Person:
     preferences: dict[str, Any]
     created_at: str
     updated_at: str
+    archived_at: str | None
 
 
 @dataclass(slots=True, frozen=True)
@@ -74,6 +75,7 @@ class Event:
     recurrence: str | None
     source: str | None
     status: str
+    archived_at: str | None
 
 
 @dataclass(slots=True, frozen=True)
@@ -175,9 +177,33 @@ class MemoryStore:
             self._backup_and_rebuild()
             return
 
+        # Patch missing columns BEFORE running the schema, so any indexes
+        # that reference those columns succeed when re-applied.
+        self._patch_v2_columns()
         with open(SCHEMA_PATH, encoding="utf-8") as f:
             self.conn.executescript(f.read())
         self.conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
+
+    def _patch_v2_columns(self) -> None:
+        """Add columns introduced after v2 first shipped — backwards-compatible
+        ALTER TABLE so existing v2 DBs pick up the new shape. No-op on fresh
+        DBs where the table itself doesn't exist yet."""
+        for table, column, ddl in [
+            ("people", "archived_at", "TEXT"),
+            ("events", "archived_at", "TEXT"),
+        ]:
+            exists = self.conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (table,)
+            ).fetchone()
+            if not exists:
+                continue
+            cols = {
+                row["name"]
+                for row in self.conn.execute(f"PRAGMA table_info({table})").fetchall()
+            }
+            if column not in cols:
+                self.conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {ddl}")
+                log.info("memory.column_added", table=table, column=column)
 
     def _backup_and_rebuild(self) -> None:
         """Close, rename db file to a timestamped backup, reopen with v2 schema."""
@@ -238,9 +264,51 @@ class MemoryStore:
         ).fetchone()
         return _row_to_person(row) if row else None
 
-    def list_people(self) -> list[Person]:
-        rows = self.conn.execute("SELECT * FROM people ORDER BY id").fetchall()
+    def list_people(self, *, include_archived: bool = False) -> list[Person]:
+        if include_archived:
+            rows = self.conn.execute("SELECT * FROM people ORDER BY id").fetchall()
+        else:
+            rows = self.conn.execute(
+                "SELECT * FROM people WHERE archived_at IS NULL ORDER BY id"
+            ).fetchall()
         return [_row_to_person(r) for r in rows]
+
+    def update_person(
+        self,
+        person_id: int,
+        *,
+        name: str | None = None,
+        relation: str | None = None,
+        birthday: str | None = None,
+    ) -> None:
+        sets: list[str] = []
+        params: list[Any] = []
+        if name is not None:
+            sets.append("name = ?"); params.append(name)
+        if relation is not None:
+            sets.append("relation = ?"); params.append(relation or None)
+        if birthday is not None:
+            sets.append("birthday = ?"); params.append(birthday or None)
+        if not sets:
+            return
+        sets.append("updated_at = CURRENT_TIMESTAMP")
+        params.append(person_id)
+        self.conn.execute(
+            f"UPDATE people SET {', '.join(sets)} WHERE id = ?",
+            tuple(params),
+        )
+
+    def archive_person(self, person_id: int) -> None:
+        self.conn.execute(
+            "UPDATE people SET archived_at = CURRENT_TIMESTAMP "
+            "WHERE id = ? AND archived_at IS NULL",
+            (person_id,),
+        )
+
+    def restore_person(self, person_id: int) -> None:
+        self.conn.execute(
+            "UPDATE people SET archived_at = NULL WHERE id = ?", (person_id,)
+        )
 
     # ── sessions ───────────────────────────────────────────────────────
 
@@ -460,6 +528,7 @@ class MemoryStore:
             rows = self.conn.execute(
                 "SELECT * FROM events "
                 "WHERE status = 'pending' "
+                "  AND archived_at IS NULL "
                 "  AND when_at >= ? "
                 "  AND when_at <= datetime(?, '+' || ? || ' hours') "
                 "ORDER BY when_at",
@@ -469,6 +538,7 @@ class MemoryStore:
             rows = self.conn.execute(
                 "SELECT * FROM events "
                 "WHERE status = 'pending' "
+                "  AND archived_at IS NULL "
                 "  AND when_at >= CURRENT_TIMESTAMP "
                 "  AND when_at <= datetime('now', '+' || ? || ' hours') "
                 "ORDER BY when_at",
@@ -482,6 +552,55 @@ class MemoryStore:
         self.conn.execute(
             "UPDATE events SET status = ? WHERE id = ?",
             (status, event_id),
+        )
+
+    def list_all_events(self, *, include_archived: bool = False) -> list[Event]:
+        if include_archived:
+            rows = self.conn.execute(
+                "SELECT * FROM events ORDER BY when_at DESC"
+            ).fetchall()
+        else:
+            rows = self.conn.execute(
+                "SELECT * FROM events WHERE archived_at IS NULL "
+                "ORDER BY when_at DESC"
+            ).fetchall()
+        return [_row_to_event(r) for r in rows]
+
+    def update_event(
+        self,
+        event_id: int,
+        *,
+        type: str | None = None,
+        title: str | None = None,
+        when_at: str | None = None,
+        recurrence: str | None = None,
+        person_id: int | None = None,
+    ) -> None:
+        sets: list[str] = []
+        params: list[Any] = []
+        if type is not None:     sets.append("type = ?"); params.append(type)
+        if title is not None:    sets.append("title = ?"); params.append(title)
+        if when_at is not None:  sets.append("when_at = ?"); params.append(when_at)
+        if recurrence is not None: sets.append("recurrence = ?"); params.append(recurrence or None)
+        if person_id is not None: sets.append("person_id = ?"); params.append(person_id)
+        if not sets:
+            return
+        params.append(event_id)
+        self.conn.execute(
+            f"UPDATE events SET {', '.join(sets)} WHERE id = ?",
+            tuple(params),
+        )
+
+    def archive_event(self, event_id: int) -> None:
+        self.conn.execute(
+            "UPDATE events SET archived_at = CURRENT_TIMESTAMP "
+            "WHERE id = ? AND archived_at IS NULL",
+            (event_id,),
+        )
+
+    def restore_event(self, event_id: int) -> None:
+        self.conn.execute(
+            "UPDATE events SET archived_at = NULL WHERE id = ?", (event_id,)
         )
 
     # ── facts ──────────────────────────────────────────────────────────
@@ -514,11 +633,57 @@ class MemoryStore:
         ).fetchall()
         return [_row_to_fact(r) for r in rows]
 
+    def list_all_facts(self, *, include_archived: bool = False) -> list[Fact]:
+        if include_archived:
+            rows = self.conn.execute(
+                "SELECT * FROM facts ORDER BY valid_from DESC"
+            ).fetchall()
+        else:
+            rows = self.conn.execute(
+                "SELECT * FROM facts WHERE archived_at IS NULL "
+                "ORDER BY valid_from DESC"
+            ).fetchall()
+        return [_row_to_fact(r) for r in rows]
+
+    def get_fact(self, fact_id: int) -> Fact | None:
+        row = self.conn.execute("SELECT * FROM facts WHERE id = ?", (fact_id,)).fetchone()
+        return _row_to_fact(row) if row else None
+
+    def update_fact(
+        self,
+        fact_id: int,
+        *,
+        predicate: str | None = None,
+        object: str | None = None,
+        confidence: float | None = None,
+    ) -> None:
+        sets: list[str] = []
+        params: list[Any] = []
+        if predicate is not None:
+            sets.append("predicate = ?"); params.append(predicate)
+        if object is not None:
+            sets.append("object = ?"); params.append(object)
+        if confidence is not None:
+            if not (0.0 <= confidence <= 1.0):
+                raise ValueError("confidence must be 0..1")
+            sets.append("confidence = ?"); params.append(confidence)
+        if not sets:
+            return
+        params.append(fact_id)
+        self.conn.execute(
+            f"UPDATE facts SET {', '.join(sets)} WHERE id = ?", tuple(params),
+        )
+
     def archive_fact(self, fact_id: int) -> None:
         self.conn.execute(
             "UPDATE facts SET archived_at = CURRENT_TIMESTAMP "
             "WHERE id = ? AND archived_at IS NULL",
             (fact_id,),
+        )
+
+    def restore_fact(self, fact_id: int) -> None:
+        self.conn.execute(
+            "UPDATE facts SET archived_at = NULL WHERE id = ?", (fact_id,)
         )
 
     # ── preferences ────────────────────────────────────────────────────
@@ -663,6 +828,11 @@ class MemoryStore:
 
 
 def _row_to_person(r: sqlite3.Row) -> Person:
+    archived_at: str | None = None
+    try:
+        archived_at = r["archived_at"]
+    except (IndexError, KeyError):
+        pass
     return Person(
         id=r["id"],
         name=r["name"],
@@ -671,6 +841,7 @@ def _row_to_person(r: sqlite3.Row) -> Person:
         preferences=json.loads(r["preferences_json"]),
         created_at=r["created_at"],
         updated_at=r["updated_at"],
+        archived_at=archived_at,
     )
 
 
@@ -696,6 +867,11 @@ def _row_to_message(r: sqlite3.Row) -> Message:
 
 
 def _row_to_event(r: sqlite3.Row) -> Event:
+    archived_at: str | None = None
+    try:
+        archived_at = r["archived_at"]
+    except (IndexError, KeyError):
+        pass
     return Event(
         id=r["id"],
         person_id=r["person_id"],
@@ -705,6 +881,7 @@ def _row_to_event(r: sqlite3.Row) -> Event:
         recurrence=r["recurrence"],
         source=r["source"],
         status=r["status"],
+        archived_at=archived_at,
     )
 
 
