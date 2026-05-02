@@ -11,18 +11,20 @@
       <header class="topbar">
         <div class="brand">
           <span class="logo">her</span>
-          <span class="tagline" id="session-title">— 가족같이 곁에 있는 비서</span>
+          <span class="tagline" id="session-title">새 대화</span>
         </div>
         <div class="status">
           <span id="orb" class="orb idle" aria-hidden="true"></span>
-          <span id="status-text" class="status-text">준비 완료</span>
+          <span id="status-text" class="status-text">준비됨</span>
         </div>
       </header>
 
       <aside class="left-panel" aria-label="대화 세션 목록">
         <div class="panel-head">
-          <h2>대화</h2>
-          <button id="new-session" class="ghost-btn" type="button">+ 새 대화</button>
+          <h2 data-icon="message">대화</h2>
+          <button id="new-session" class="ghost-btn" type="button" data-icon="plus">
+            새 대화
+          </button>
         </div>
         <ul id="session-list" class="session-list" role="list"></ul>
       </aside>
@@ -30,41 +32,52 @@
       <main class="chat-panel" aria-label="채팅">
         <div id="messages" class="messages" role="log" aria-live="polite"></div>
         <form id="composer" class="composer" autocomplete="off">
-          <textarea
-            id="input"
-            class="input"
-            placeholder="무엇이든 물어보세요. Enter 전송, Shift+Enter 줄바꿈."
-            rows="1"
-            aria-label="메시지 입력"
-          ></textarea>
-          <button type="submit" id="send" class="primary-btn">보내기</button>
+          <div class="input-wrap">
+            <textarea
+              id="input"
+              class="input"
+              placeholder="무엇이든 물어보세요. Enter 전송, Shift+Enter 줄바꿈."
+              rows="1"
+              aria-label="메시지 입력"
+            ></textarea>
+            <button type="submit" id="send" class="send-btn" aria-label="전송">
+              <span class="icon" data-icon="send" aria-hidden="true"></span>
+            </button>
+          </div>
         </form>
       </main>
 
       <aside class="right-panel" aria-label="메모리 프로브">
         <div class="panel-head">
-          <h2>메모리 프로브</h2>
+          <h2 data-icon="brain">메모리 프로브</h2>
         </div>
 
-        <section class="probe-section">
-          <h3>이번 답변에 떠올린 기억</h3>
+        <section class="probe-section" data-section="recall">
+          <div class="section-head">
+            <span class="section-label">이번 답변에 떠올린 기억</span>
+          </div>
           <div id="probe-recall" class="probe-recall">
-            <p class="empty">아직 비어 있어요. 질문을 보내면 채워집니다.</p>
+            <p class="empty">질문을 보내면 채워집니다</p>
           </div>
         </section>
 
-        <section class="probe-section">
-          <h3>최근 메모</h3>
+        <section class="probe-section" data-section="notes">
+          <div class="section-head">
+            <span class="section-label" data-icon="note">메모</span>
+          </div>
           <ul id="recent-notes" class="probe-list"></ul>
         </section>
 
-        <section class="probe-section">
-          <h3>알고 있는 사람</h3>
+        <section class="probe-section" data-section="people">
+          <div class="section-head">
+            <span class="section-label" data-icon="user">사람</span>
+          </div>
           <ul id="recent-people" class="probe-list"></ul>
         </section>
       </aside>
     </div>
 
+    <script type="module" src="/static/icons.js"></script>
     <script type="module" src="/static/sessions.js"></script>
     <script type="module" src="/static/chat.js"></script>
     <script type="module" src="/static/memory.js"></script>

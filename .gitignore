@@ -9,6 +9,7 @@ secrets/
 
 # ── User & family data (per CLAUDE.md §10 — must never leave the box) ──
 data/db.sqlite
+data/db.sqlite.bak-*
 data/db.sqlite-journal
 data/db.sqlite-wal
 data/db.sqlite-shm

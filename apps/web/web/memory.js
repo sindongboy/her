@@ -1,9 +1,17 @@
 // Right column: memory probe + recent notes/people.
 import { on } from "/static/state.js";
+import { iconHTML } from "/static/icons.js";
 
 const probeRecallEl = document.getElementById("probe-recall");
 const recentNotesEl = document.getElementById("recent-notes");
 const recentPeopleEl = document.getElementById("recent-people");
+
+const KIND_META = {
+  fact:    { label: "사실",   icon: "bulb" },
+  note:    { label: "메모",   icon: "note" },
+  event:   { label: "일정",   icon: "calendar" },
+  session: { label: "관련 대화", icon: "history" },
+};
 
 function clear(node) {
   while (node.firstChild) node.removeChild(node.firstChild);
@@ -16,25 +24,37 @@ function emptyP(text) {
   return p;
 }
 
-function block(label, items, render) {
+function makeGroup(kind, items, render) {
   if (!items || items.length === 0) return null;
+  const meta = KIND_META[kind];
   const wrap = document.createElement("div");
-  wrap.className = "recall-block";
-  const lab = document.createElement("div");
-  lab.className = "label";
-  lab.textContent = label;
-  wrap.append(lab);
+  wrap.className = "recall-group";
+  wrap.dataset.kind = kind;
+
+  const head = document.createElement("div");
+  head.className = "group-head";
+
+  const pill = document.createElement("span");
+  pill.className = "pill";
+  pill.innerHTML = `<span class="icon">${iconHTML(meta.icon)}</span><span>${meta.label}</span>`;
+
+  const count = document.createElement("span");
+  count.className = "count";
+  count.textContent = items.length;
+
+  head.append(pill, count);
+  wrap.append(head);
+
   for (const item of items) wrap.append(render(item));
   return wrap;
 }
 
-function card(title, secondary) {
+function makeCard(primary, secondary) {
   const c = document.createElement("div");
   c.className = "recall-card";
-  const t = document.createElement("div");
-  t.className = "primary";
-  t.textContent = title;
-  c.append(t);
+  const p = document.createElement("div");
+  p.textContent = primary;
+  c.append(p);
   if (secondary) {
     const s = document.createElement("div");
     s.className = "secondary";
@@ -47,25 +67,28 @@ function card(title, secondary) {
 function renderRecall(detail) {
   clear(probeRecallEl);
 
-  const blocks = [
-    block("Facts", detail.facts, (f) =>
-      card(
+  const groups = [
+    makeGroup("fact", detail.facts, (f) =>
+      makeCard(
         `${f.predicate} → ${f.object}`,
-        f.person_name ? `인물: ${f.person_name}` : "",
+        f.person_name ? `· ${f.person_name}` : "",
       ),
     ),
-    block("Notes", detail.notes, (n) => card(n.content, "")),
-    block("Events", detail.events, (e) => card(e.title, e.when_at)),
-    block("Sessions", detail.sessions, (s) =>
-      card(s.summary || `세션 ${s.id}`, `score ${s.score?.toFixed?.(2) ?? ""}`),
+    makeGroup("note", detail.notes, (n) => makeCard(n.content, "")),
+    makeGroup("event", detail.events, (e) => makeCard(e.title, e.when_at)),
+    makeGroup("session", detail.sessions, (s) =>
+      makeCard(
+        s.summary || `세션 ${s.id}`,
+        typeof s.score === "number" ? `score ${s.score.toFixed(2)}` : "",
+      ),
     ),
   ].filter(Boolean);
 
-  if (blocks.length === 0) {
-    probeRecallEl.append(emptyP("이번 답변에선 떠올린 기억이 없습니다."));
+  if (groups.length === 0) {
+    probeRecallEl.append(emptyP("이번 답변엔 떠올린 기억이 없어요"));
     return;
   }
-  for (const b of blocks) probeRecallEl.append(b);
+  for (const g of groups) probeRecallEl.append(g);
 }
 
 async function refreshSidebar() {
@@ -74,35 +97,53 @@ async function refreshSidebar() {
       fetch("/api/memory/notes"),
       fetch("/api/memory/people"),
     ]);
+
     if (notesR.ok) {
       const notes = await notesR.json();
       clear(recentNotesEl);
       if (notes.length === 0) {
-        recentNotesEl.append(emptyP("아직 메모가 없어요."));
+        recentNotesEl.append(emptyP("아직 메모가 없어요"));
       } else {
         for (const n of notes.slice(0, 8)) {
           const li = document.createElement("li");
-          li.className = "probe-item";
-          li.textContent = n.content;
+          li.className = "probe-item note";
+          const main = document.createElement("div");
+          main.textContent = n.content;
+          li.append(main);
+          if (Array.isArray(n.tags) && n.tags.length) {
+            const tagWrap = document.createElement("div");
+            tagWrap.className = "tags";
+            for (const t of n.tags) {
+              const tag = document.createElement("span");
+              tag.className = "tag";
+              tag.textContent = t;
+              tagWrap.append(tag);
+            }
+            li.append(tagWrap);
+          }
           recentNotesEl.append(li);
         }
       }
     }
+
     if (peopleR.ok) {
       const people = await peopleR.json();
       clear(recentPeopleEl);
       if (people.length === 0) {
-        recentPeopleEl.append(emptyP("등록된 사람이 없어요."));
+        recentPeopleEl.append(emptyP("등록된 사람이 없어요"));
       } else {
         for (const p of people.slice(0, 12)) {
           const li = document.createElement("li");
-          li.className = "probe-item";
+          li.className = "probe-item person";
           const main = document.createElement("div");
           main.textContent = p.name;
-          const meta = document.createElement("div");
-          meta.className = "meta";
-          meta.textContent = p.relation || "";
-          li.append(main, meta);
+          li.append(main);
+          if (p.relation) {
+            const meta = document.createElement("div");
+            meta.className = "meta";
+            meta.textContent = p.relation;
+            li.append(meta);
+          }
           recentPeopleEl.append(li);
         }
       }
