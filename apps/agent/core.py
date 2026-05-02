@@ -51,6 +51,8 @@ def _publish(bus: EventBus | None, event: Event) -> None:
 
 # Max summary length stored in sessions.summary per turn.
 _SUMMARY_MAX_CHARS = 200
+# Title is set once on the first turn from the user's message, truncated.
+_TITLE_MAX_CHARS = 40
 
 _SYSTEM_BASE = """당신은 따뜻하고 가까운 가족 같은 AI 비서입니다.
 사용자와 그 가족을 기억하고, 일정과 이벤트를 챙기며, 먼저 제안합니다.
@@ -346,9 +348,21 @@ class AgentCore:
         return [{"role": "user", "content": final_content}], alias_map
 
     def _persist_turn(self, session_id: int, user_msg: str, assistant_msg: str) -> None:
-        """Append user + assistant rows to messages, refresh session summary."""
+        """Append user + assistant rows to messages, refresh session summary,
+        and seed the session title from the first user message."""
         self.store.add_message(session_id, "user", user_msg)
         self.store.add_message(session_id, "assistant", assistant_msg)
+
+        # Seed the title once from the FIRST user message — keeps the left
+        # panel readable. Looks up first user msg so old sessions that
+        # predate this seeding still pick up a title on their next turn.
+        sess = self.store.get_session(session_id)
+        if sess is not None and not sess.title:
+            msgs = self.store.list_messages(session_id)
+            first_user = next((m.content for m in msgs if m.role == "user"), None)
+            if first_user and first_user.strip():
+                title = first_user.strip().splitlines()[0][:_TITLE_MAX_CHARS]
+                self.store.set_session_title(session_id, title)
 
         snippet = f"U: {user_msg[:80]} | A: {assistant_msg[:80]}"
         snippet = snippet[:_SUMMARY_MAX_CHARS]
