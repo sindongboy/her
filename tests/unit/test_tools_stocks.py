@@ -120,6 +120,51 @@ class TestGetQuotesRouting:
             asyncio.run(stocks.get_quotes(["MSFT"]))  # cached
         assert call_count["n"] == 1
 
+class TestSearchSymbols:
+    def setup_method(self) -> None:
+        stocks._quote_cache.clear()
+
+    def test_returns_empty_without_key(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.delenv("FINNHUB_API_KEY", raising=False)
+        out = asyncio.run(stocks.search_symbols("apple"))
+        assert out == []
+
+    def test_returns_empty_for_short_query(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("FINNHUB_API_KEY", "X")
+        out = asyncio.run(stocks.search_symbols(""))
+        assert out == []
+
+    def test_normalises_finnhub_response(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("FINNHUB_API_KEY", "X")
+
+        from unittest.mock import AsyncMock, MagicMock
+
+        body = {
+            "result": [
+                {"symbol": "AAPL", "displaySymbol": "AAPL",
+                 "description": "Apple Inc", "type": "Common Stock"},
+                {"symbol": "005930.KS", "displaySymbol": "005930.KS",
+                 "description": "Samsung Electronics Co Ltd", "type": "Common Stock"},
+            ]
+        }
+        resp = MagicMock(); resp.json.return_value = body; resp.raise_for_status = MagicMock()
+        client = MagicMock()
+        client.__aenter__ = AsyncMock(return_value=client)
+        client.__aexit__ = AsyncMock(return_value=None)
+        client.get = AsyncMock(return_value=resp)
+
+        with patch("apps.tools.stocks.httpx.AsyncClient", return_value=client):
+            out = asyncio.run(stocks.search_symbols("apple", limit=5))
+
+        assert len(out) == 2
+        assert out[0]["symbol"] == "AAPL"
+        assert out[1]["symbol"] == "005930.KS"
+        assert out[0]["name"] == "Apple Inc"
+
+
+class TestGetQuotesFailures:
     def test_per_ticker_failure_does_not_drop_others(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:

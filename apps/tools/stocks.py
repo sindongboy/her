@@ -66,6 +66,50 @@ def classify(ticker: str) -> tuple[str, str]:
 # ── public API ─────────────────────────────────────────────────────────
 
 
+async def search_symbols(query: str, *, limit: int = 10) -> list[dict[str, Any]]:
+    """Symbol/company-name search via Finnhub. Cross-market (US, KR with .KS,
+    JP with .T, etc.). Returns up to *limit* matches as dicts:
+        {symbol, display_symbol, name, type}
+    Empty list when no key, empty query, or API failure.
+    """
+    q = query.strip()
+    if not q:
+        return []
+    finnhub_key = os.environ.get("FINNHUB_API_KEY", "").strip()
+    if not finnhub_key:
+        return []
+    try:
+        async with httpx.AsyncClient(timeout=4.0) as cli:
+            r = await cli.get(
+                "https://finnhub.io/api/v1/search",
+                params={"q": q, "token": finnhub_key},
+            )
+            r.raise_for_status()
+            body = r.json()
+    except Exception as exc:
+        log.warning("stocks.search_failed", query=q, error=str(exc))
+        return []
+
+    out: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for item in body.get("result") or []:
+        sym = str(item.get("symbol") or "").strip()
+        if not sym or sym in seen:
+            continue
+        seen.add(sym)
+        out.append(
+            {
+                "symbol": sym,
+                "display_symbol": str(item.get("displaySymbol") or sym),
+                "name": str(item.get("description") or "").strip(),
+                "type": str(item.get("type") or "").strip(),
+            }
+        )
+        if len(out) >= limit:
+            break
+    return out
+
+
 async def get_quotes(tickers: list[str]) -> list[dict[str, Any]]:
     """Fetch quotes for many tickers, dispatching per-provider.
 

@@ -39,7 +39,10 @@ register({
     container.innerHTML = `
       <ul class="stocks-list"></ul>
       <div class="stocks-edit">
-        <input type="text" class="stocks-input" placeholder="티커 추가 (예: TSLA, 005930.KS)" />
+        <div class="stocks-search">
+          <input type="text" class="stocks-input" placeholder="종목명 또는 티커 (예: 삼성전자, AAPL)" autocomplete="off" />
+          <ul class="stocks-suggest" hidden></ul>
+        </div>
         <button type="button" class="stocks-add"><span class="icon">${iconHTML("plus")}</span></button>
       </div>
     `;
@@ -47,6 +50,7 @@ register({
     const listEl = container.querySelector(".stocks-list");
     const inputEl = container.querySelector(".stocks-input");
     const addBtn = container.querySelector(".stocks-add");
+    const suggestEl = container.querySelector(".stocks-suggest");
 
     function persist() {
       ctx.updateSettings({ tickers });
@@ -114,30 +118,123 @@ register({
       }
     }
 
-    function tryAdd() {
-      const v = inputEl.value.trim().toUpperCase();
-      if (!v) return;
-      if (tickers.includes(v)) {
+    function escape(s) {
+      return String(s ?? "")
+        .replace(/&/g, "&amp;")
+        .replace(/</g, "&lt;")
+        .replace(/>/g, "&gt;")
+        .replace(/"/g, "&quot;");
+    }
+
+    function addTicker(symbol) {
+      const sym = String(symbol || "").trim().toUpperCase();
+      if (!sym) return;
+      if (tickers.includes(sym)) {
         inputEl.value = "";
+        hideSuggestions();
         return;
       }
-      tickers.push(v);
+      tickers.push(sym);
       inputEl.value = "";
+      hideSuggestions();
       persist();
       fetchQuotes();
     }
 
-    addBtn.addEventListener("click", tryAdd);
+    function tryAddFromInput() {
+      const v = inputEl.value.trim();
+      if (!v) return;
+      // If suggestions are open and have a focused item, prefer that.
+      const focused = suggestEl.querySelector(".stocks-suggest-item.focused");
+      if (focused) { addTicker(focused.dataset.symbol); return; }
+      // Else add the literal text as a ticker (uppercased).
+      addTicker(v);
+    }
+
+    let suggestSeq = 0;
+    let lastQuery = "";
+    let debounceTimer = null;
+
+    function hideSuggestions() {
+      suggestEl.hidden = true;
+      suggestEl.innerHTML = "";
+    }
+
+    function renderSuggestions(matches) {
+      if (!matches.length) { hideSuggestions(); return; }
+      suggestEl.innerHTML = matches
+        .map(
+          (m) => `
+            <li class="stocks-suggest-item" data-symbol="${escape(m.symbol)}" tabindex="-1">
+              <span class="ss-sym">${escape(m.display_symbol || m.symbol)}</span>
+              <span class="ss-name">${escape(m.name)}</span>
+            </li>`,
+        )
+        .join("");
+      suggestEl.hidden = false;
+      suggestEl.querySelectorAll(".stocks-suggest-item").forEach((li) => {
+        li.addEventListener("mousedown", (ev) => {
+          ev.preventDefault();   // keep focus on input so blur doesn't fire first
+          addTicker(li.dataset.symbol);
+        });
+      });
+    }
+
+    async function fetchSuggestions(query) {
+      const seq = ++suggestSeq;
+      try {
+        const r = await fetch(`/api/widgets/stocks/search?q=${encodeURIComponent(query)}`);
+        if (!r.ok) return;
+        const matches = await r.json();
+        if (seq !== suggestSeq) return;  // stale response — newer query in-flight
+        renderSuggestions(matches);
+      } catch (err) {
+        console.warn("stocks suggest failed", err);
+      }
+    }
+
+    function scheduleSuggest() {
+      const v = inputEl.value.trim();
+      if (v === lastQuery) return;
+      lastQuery = v;
+      clearTimeout(debounceTimer);
+      if (v.length < 2) { hideSuggestions(); return; }
+      debounceTimer = setTimeout(() => fetchSuggestions(v), 250);
+    }
+
+    function moveFocus(dir) {
+      const items = [...suggestEl.querySelectorAll(".stocks-suggest-item")];
+      if (!items.length) return;
+      const cur = items.findIndex((it) => it.classList.contains("focused"));
+      const next = (cur + dir + items.length) % items.length;
+      items.forEach((it) => it.classList.remove("focused"));
+      const target = cur < 0 && dir < 0 ? items[items.length - 1] : items[next < 0 ? 0 : next];
+      target.classList.add("focused");
+      target.scrollIntoView({ block: "nearest" });
+    }
+
+    addBtn.addEventListener("click", tryAddFromInput);
+    inputEl.addEventListener("input", scheduleSuggest);
+    inputEl.addEventListener("blur", () => {
+      // Hide after a short delay so mousedown on a suggestion still wins.
+      setTimeout(hideSuggestions, 120);
+    });
     inputEl.addEventListener("keydown", (ev) => {
       if (ev.isComposing || ev.keyCode === 229) return;
+      if (ev.key === "ArrowDown") { ev.preventDefault(); moveFocus(+1); return; }
+      if (ev.key === "ArrowUp")   { ev.preventDefault(); moveFocus(-1); return; }
+      if (ev.key === "Escape")    { hideSuggestions(); return; }
       if (ev.key === "Enter") {
         ev.preventDefault();
-        tryAdd();
+        tryAddFromInput();
       }
     });
 
     fetchQuotes();
     const interval = setInterval(fetchQuotes, 60 * 1000);
-    return () => clearInterval(interval);
+    return () => {
+      clearInterval(interval);
+      clearTimeout(debounceTimer);
+    };
   },
 });

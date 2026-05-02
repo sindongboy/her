@@ -500,6 +500,16 @@ def create_app(
         quotes = await get_quotes(ticker_list)
         return quotes
 
+    @app.get("/api/widgets/stocks/search")
+    async def widget_stocks_search(request: Request, q: str = "", limit: int = 8) -> Any:
+        """Symbol/company-name typeahead via Finnhub. Returns matches sorted
+        roughly by relevance (Finnhub's order)."""
+        _require_loopback(request)
+        from apps.tools.stocks import search_symbols
+        if len(q.strip()) < 2:
+            return []
+        return await search_symbols(q.strip(), limit=max(1, min(int(limit), 20)))
+
     @app.get("/api/widgets/stock-news")
     async def widget_stock_news(
         request: Request,
