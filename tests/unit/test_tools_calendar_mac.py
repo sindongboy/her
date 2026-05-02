@@ -15,9 +15,19 @@ from apps.tools.calendar_mac import (
     CalendarEvent,
     CalendarUnavailable,
     _detect_tcc_error,
+    _events_cache,
     _parse_line,
     get_events,
 )
+
+
+@pytest.fixture(autouse=True)
+def _clear_calendar_cache():
+    """Clear the in-memory events cache between tests so canned stdout
+    fixtures don't cross-contaminate."""
+    _events_cache.clear()
+    yield
+    _events_cache.clear()
 
 
 # ── Helpers ────────────────────────────────────────────────────────────────
@@ -64,17 +74,17 @@ class TestDetectTccError:
 
 class TestParseLine:
     def test_valid_timed_event(self) -> None:
-        line = "팀 미팅|||회사|||false|||2026-05-01T14:00:00|||2026-05-01T15:00:00"
+        line = "팀 미팅|||회사|||false|||2099-05-01T14:00:00|||2099-05-01T15:00:00"
         ev = _parse_line(line)
         assert ev is not None
         assert ev.title == "팀 미팅"
         assert ev.calendar_name == "회사"
-        assert ev.starts_at_iso == "2026-05-01T14:00:00"
-        assert ev.ends_at_iso == "2026-05-01T15:00:00"
+        assert ev.starts_at_iso == "2099-05-01T14:00:00"
+        assert ev.ends_at_iso == "2099-05-01T15:00:00"
         assert ev.is_all_day is False
 
     def test_valid_allday_event(self) -> None:
-        line = "워크숍|||개인|||true|||2026-05-02T00:00:00|||2026-05-03T00:00:00"
+        line = "워크숍|||개인|||true|||2099-05-02T00:00:00|||2099-05-03T00:00:00"
         ev = _parse_line(line)
         assert ev is not None
         assert ev.is_all_day is True
@@ -89,7 +99,7 @@ class TestParseLine:
         assert _parse_line("no separators at all") is None
 
     def test_empty_end_iso(self) -> None:
-        line = "이벤트|||캘린더|||false|||2026-05-01T09:00:00|||"
+        line = "이벤트|||캘린더|||false|||2099-05-01T09:00:00|||"
         ev = _parse_line(line)
         assert ev is not None
         assert ev.ends_at_iso is None
@@ -99,9 +109,9 @@ class TestParseLine:
 
 
 _CANNED_STDOUT = (
-    "팀 미팅|||회사|||false|||2026-05-01T14:00:00|||2026-05-01T15:00:00\n"
-    "가족 저녁|||가족|||false|||2026-05-01T19:00:00|||2026-05-01T21:00:00\n"
-    "종일 행사|||개인|||true|||2026-05-02T00:00:00|||2026-05-03T00:00:00\n"
+    "팀 미팅|||회사|||false|||2099-05-01T14:00:00|||2099-05-01T15:00:00\n"
+    "가족 저녁|||가족|||false|||2099-05-01T19:00:00|||2099-05-01T21:00:00\n"
+    "종일 행사|||개인|||true|||2099-05-02T00:00:00|||2099-05-03T00:00:00\n"
 )
 
 
@@ -135,7 +145,7 @@ class TestGetEventsDarwin:
     async def test_bad_lines_skipped_silently(self) -> None:
         stdout = (
             "bad_line_no_separators\n"
-            "팀 미팅|||회사|||false|||2026-05-01T14:00:00|||2026-05-01T15:00:00\n"
+            "팀 미팅|||회사|||false|||2099-05-01T14:00:00|||2099-05-01T15:00:00\n"
             "only|||two\n"
         )
         proc = _make_proc(stdout=stdout)
@@ -189,8 +199,8 @@ class TestGetEventsDarwin:
     @pytest.mark.asyncio
     async def test_sorted_ascending_by_start(self) -> None:
         stdout = (
-            "늦은 이벤트|||A|||false|||2026-05-01T18:00:00|||2026-05-01T19:00:00\n"
-            "이른 이벤트|||B|||false|||2026-05-01T09:00:00|||2026-05-01T10:00:00\n"
+            "늦은 이벤트|||A|||false|||2099-05-01T18:00:00|||2099-05-01T19:00:00\n"
+            "이른 이벤트|||B|||false|||2099-05-01T09:00:00|||2099-05-01T10:00:00\n"
         )
         proc = _make_proc(stdout=stdout)
         with patch(
@@ -204,7 +214,7 @@ class TestGetEventsDarwin:
     @pytest.mark.asyncio
     async def test_max_events_respected(self) -> None:
         lines = "\n".join(
-            f"이벤트{i}|||캘린더|||false|||2026-05-01T{9+i:02d}:00:00|||2026-05-01T{10+i:02d}:00:00"
+            f"이벤트{i}|||캘린더|||false|||2099-05-01T{9+i:02d}:00:00|||2099-05-01T{10+i:02d}:00:00"
             for i in range(10)
         ) + "\n"
         proc = _make_proc(stdout=lines)

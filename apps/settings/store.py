@@ -59,7 +59,10 @@ class Settings:
     enable_search_grounding: bool = True
     # macOS Calendar integration — reads today + tomorrow events via osascript.
     enable_calendar: bool = True
-    calendar_lookahead_days: int = 2
+    # Widget views go ~2 weeks ahead by default. The agent's recall path
+    # uses its own narrower window (24h) so this only affects the calendar
+    # widget / system-prompt context block.
+    calendar_lookahead_days: int = 14
     calendar_max_events: int = 8
     schema_version: int = _SCHEMA_VERSION
 
