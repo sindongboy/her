@@ -500,6 +500,28 @@ def create_app(
         quotes = await get_quotes(ticker_list)
         return quotes
 
+    @app.get("/api/widgets/stock-news")
+    async def widget_stock_news(
+        request: Request,
+        tickers: str = "",
+        per_ticker: int = 3,
+        days: int = 7,
+    ) -> Any:
+        """Per-ticker news. Returns {ticker: [items]} keyed by input ticker."""
+        _require_loopback(request)
+        from apps.tools.news import search_stock_news
+        ticker_list = [t.strip().upper() for t in tickers.split(",") if t.strip()]
+        per_ticker = max(1, min(int(per_ticker), 8))
+        days = max(1, min(int(days), 30))
+
+        async def _one(t: str) -> tuple[str, list[dict[str, Any]]]:
+            items = await search_stock_news(t, max_results=per_ticker, days=days)
+            return t, items
+
+        import asyncio as _asyncio
+        results = await _asyncio.gather(*[_one(t) for t in ticker_list])
+        return {ticker: items for ticker, items in results}
+
     @app.get("/api/memory/probe")
     async def memory_probe(request: Request, session_id: int | None = None) -> Any:
         _require_loopback(request)

@@ -206,6 +206,24 @@ class AgentCore:
         flash = self._get_flash_client()
         return await filter_by_relevance(ctx, message, flash)
 
+    async def maybe_fetch_news(self, message: str) -> str:
+        """If the user message looks news-seeking, query Tavily and return a
+        formatted block to splice into the system prompt. Empty string when
+        no trigger / no results / no API key."""
+        from apps.tools.news import (
+            format_for_prompt,
+            looks_like_news_query,
+            search_news,
+        )
+        if not looks_like_news_query(message):
+            return ""
+        try:
+            items = await search_news(message, max_results=5, days=7)
+        except Exception as exc:
+            log.warning("agent.news.fetch_failed", error=str(exc))
+            return ""
+        return format_for_prompt(items, label="최근 뉴스")
+
     # ── memory write-from-chat ───────────────────────────────────────────
 
     async def maybe_remember(
@@ -368,6 +386,9 @@ class AgentCore:
         ctx = recall_ctx if recall_ctx is not None else await self.recall_for_turn(message, sid)
 
         system_prompt = _build_system_prompt()
+        news_block = await self.maybe_fetch_news(message)
+        if news_block:
+            system_prompt += "\n\n" + news_block
         messages, alias_map = self._build_messages(message, ctx)
 
         extra_parts = parts_from_attachment_refs(attachments) if attachments else []
@@ -440,6 +461,11 @@ class AgentCore:
         system_prompt = _build_system_prompt()
         if remembered:
             system_prompt += "\n\n" + _format_remembered_addon(remembered)
+
+        news_block = await self.maybe_fetch_news(message)
+        if news_block:
+            system_prompt += "\n\n" + news_block
+
         messages, alias_map = self._build_messages(message, ctx)
 
         extra_parts = parts_from_attachment_refs(attachments) if attachments else []

@@ -40,3 +40,9 @@ export GEMINI_API_KEY="REPLACE_ME"
 # export KIWOOM_APP_KEY="REPLACE_ME"
 # export KIWOOM_APP_SECRET="REPLACE_ME"
 # export KIWOOM_BASE_URL="https://api.kiwoom.com"
+
+# ── Optional: News widget + chat news intent ──────────────────────────
+# Tavily web/news search.                       https://tavily.com
+# Used by the 주식 뉴스 widget AND by the agent when the user message
+# looks news-seeking ("뉴스", "최근 동향", etc.).
+# export TAVILY_API_KEY="REPLACE_ME"

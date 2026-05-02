@@ -10,5 +10,6 @@ import "/static/widgets/types/clock.js";
 import "/static/widgets/types/weather.js";
 import "/static/widgets/types/calendar.js";
 import "/static/widgets/types/stocks.js";
+import "/static/widgets/types/stock-news.js";
 
 boot();
