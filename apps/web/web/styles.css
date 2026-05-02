@@ -1450,12 +1450,11 @@ body.mm-open { overflow: hidden; }
 .session-actions {
   display: flex;
   gap: 1px;
-  opacity: 0;
+  opacity: 0.4;
   transition: opacity 0.12s;
 }
-.session-item:hover .session-actions { opacity: 1; }
-.session-item.active .session-actions { opacity: 0.6; }
-.session-item.active:hover .session-actions { opacity: 1; }
+.session-item:hover .session-actions,
+.session-item.active .session-actions { opacity: 1; }
 .session-actions button {
   background: transparent;
   border: none;
