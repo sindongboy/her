@@ -329,6 +329,28 @@ project/
 - 웹 UI 는 외부 인증·트래킹 없음. CDN 의존 없음 (정적 자원 모두 자체 호스팅).
 - 사용자가 메시지를 명시적으로 삭제하면 `archive`(soft) 가 기본. 영구 삭제는 별도 명시적 액션이어야 한다 (현 v0 미구현).
 
+### 10.2 웹 UI 변경 시 시각 검증 (필수)
+
+`apps/web/web/` 의 HTML/CSS/JS 또는 `apps/web/server.py` 의 라우트·렌더 결과가 바뀌는 모든 작업은 **단위 테스트만으로 끝내지 않는다**. 작업 마무리 직전에 반드시 다음 절차를 수행한다:
+
+1. **서버 기동 확인** — `curl -s http://127.0.0.1:8765/ -o /dev/null -w "%{http_code}"` 가 `200` 이 아니면 `make web` 으로 띄운 뒤 다시 시도. (백그라운드 띄울 거면 `run_in_background=true`.)
+2. **Headless Chrome 으로 스크린샷** —
+   ```bash
+   CHROME="/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
+   TMP=$(mktemp -d)
+   "$CHROME" --headless --disable-gpu --hide-scrollbars --window-size=1440,900 \
+     --screenshot="$TMP/her.png" --virtual-time-budget=4000 \
+     http://127.0.0.1:8765/
+   echo "$TMP/her.png"
+   ```
+3. **PNG 를 Read 도구로 읽어 직접 확인** (Read tool 은 멀티모달 — 이미지를 시각적으로 본다). 코드 추론으로 끝내지 말고 실제 렌더 결과를 본다.
+4. 발견된 시각 문제 (정렬·간격·콘트라스트·빈 영역·잘림 등) 가 있으면 수정 후 2-3 단계 반복. 깔끔해질 때까지 사용자에게 "끝났다" 라고 보고하지 않는다.
+5. 가능하면 "초기 화면" 외에 다른 상태도 검증 — 메시지가 있는 세션 (이전 메시지 로드된 상태), recall 카드가 채워진 상태 등. v0 단계에서는 초기 화면만이라도 필수.
+
+**chrome MCP 가 다시 활성화되면** (`/chrome` 으로) 그쪽을 우선 사용. 그래도 위 headless 경로는 fallback 으로 항상 동작한다.
+
+> 이 규칙은 단위 테스트가 잡지 못하는 시각적 회귀 (촌스러운 색·잘못된 레이아웃·invisible 컴포넌트) 를 사용자가 직접 발견하기 전에 수정하기 위함이다.
+
 ---
 
 ## 11. 자주 쓰는 명령
@@ -364,6 +386,7 @@ make backup        # data/ 암호화 tar.gz
   - 설정: voice 키 (mic_consent_*, quiet_mode, wake_keyword, daily_proactive_limit, silence_threshold_hours, stt_model, tts, echo_gate_ms) 모두 제거, web_host/web_port 추가, schema_version 8.
   - Phase 0~4 로드맵 → v0~v3 (web chat MVP / 메모리 패널 / Consolidator 자동화 / notes 임베딩).
   - 무효화된 결정: macOS `say` TTS, Gemini TTS, 음성 파이프라인 Path B, Wake Word, Presence orb, launchd 데몬, Proactive 발화 엔진. 향후 음성 재도입은 신규 결정으로 시작.
+- _2026-05-02_: **웹 UI 변경 시 시각 검증 필수** (§10.2). 동기: 단위 테스트 (TestClient + WS) 가 통과해도 색·레이아웃·빈 영역 같은 시각 회귀를 못 잡음 — 실제 사용자가 먼저 발견하면 *"촌시럽고 구시대적"* 같은 피드백으로 돌아옴. 절차: headless Chrome 으로 PNG 캡처 → Read 도구로 직접 시각 확인 → 문제 발견 시 수정 → 깔끔해질 때까지 반복. chrome MCP 활성화되면 그쪽 우선, 아니면 `--headless --screenshot` fallback.
 
 ---
 
