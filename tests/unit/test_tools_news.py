@@ -112,13 +112,35 @@ class TestSearchNews:
 
         assert post_mock.await_count == 1
 
+    def test_bypass_cache_forces_refetch(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("TAVILY_API_KEY", "X")
+
+        resp = MagicMock()
+        resp.json.return_value = {"results": []}
+        resp.raise_for_status = MagicMock()
+
+        client = MagicMock()
+        client.__aenter__ = AsyncMock(return_value=client)
+        client.__aexit__ = AsyncMock(return_value=None)
+        post_mock = AsyncMock(return_value=resp)
+        client.post = post_mock
+
+        with patch("apps.tools.news.httpx.AsyncClient", return_value=client):
+            asyncio.run(news.search_news("AAPL"))
+            asyncio.run(news.search_news("AAPL", bypass_cache=True))
+
+        assert post_mock.await_count == 2
+
 
 class TestSearchStockNews:
     def test_strips_kr_suffix_from_query(self, monkeypatch: pytest.MonkeyPatch) -> None:
         captured: dict[str, Any] = {}
 
-        async def fake_search(query, *, max_results, days, topic="news"):
+        async def fake_search(query, *, max_results, days, topic="news", bypass_cache=False):
             captured["query"] = query
+            captured["bypass_cache"] = bypass_cache
             return []
 
         with patch.object(news, "search_news", side_effect=fake_search):

@@ -38,12 +38,18 @@ register({
 
     container.innerHTML = `
       <div class="news-toolbar">
+        <span class="news-last">—</span>
+        <button type="button" class="news-refresh" title="새로고침" aria-label="새로고침">
+          <span class="icon">${iconHTML("refresh")}</span>
+        </button>
         <label>종목당 <select class="news-per-ticker"></select> 개</label>
       </div>
       <div class="news-body"></div>
     `;
     const sel = container.querySelector(".news-per-ticker");
     const body = container.querySelector(".news-body");
+    const lastEl = container.querySelector(".news-last");
+    const refreshBtn = container.querySelector(".news-refresh");
 
     const opts = new Set([...PER_TICKER_OPTIONS, perTicker]);
     for (const n of [...opts].sort((a, b) => a - b)) {
@@ -65,16 +71,35 @@ register({
       return list.filter(Boolean);
     }
 
-    async function refresh() {
-      const tickers = getTickers();
-      if (tickers.length === 0) {
-        body.innerHTML = `<p class="empty">주식 위젯에서 ticker 를 먼저 추가하세요.</p>`;
+    function setLastUpdated(date) {
+      if (!date) {
+        lastEl.textContent = "—";
         return;
       }
-      body.innerHTML = `<p class="empty">불러오는 중…</p>`;
+      lastEl.textContent =
+        "갱신 " +
+        date.toLocaleTimeString("ko-KR", { hour: "2-digit", minute: "2-digit" });
+    }
+
+    let isRefreshing = false;
+    async function refresh(opts = {}) {
+      if (isRefreshing) return;
+      isRefreshing = true;
+      refreshBtn.classList.add("spinning");
+      refreshBtn.disabled = true;
+
+      const tickers = getTickers();
       try {
+        if (tickers.length === 0) {
+          body.innerHTML = `<p class="empty">주식 위젯에서 ticker 를 먼저 추가하세요.</p>`;
+          return;
+        }
+        if (opts.showLoading !== false) {
+          body.innerHTML = `<p class="empty">불러오는 중…</p>`;
+        }
         const url = `/api/widgets/stock-news?tickers=${encodeURIComponent(tickers.join(","))}&per_ticker=${perTicker}`;
-        const r = await fetch(url);
+        const force = opts.force ? "&force=true" : "";
+        const r = await fetch(url + force);
         if (!r.ok) {
           body.innerHTML = `<p class="empty">뉴스 로드 실패</p>`;
           return;
@@ -109,13 +134,21 @@ register({
         if (!any) {
           body.innerHTML = `<p class="empty">최근 뉴스가 없어요</p>`;
         }
+        setLastUpdated(new Date());
       } catch (err) {
         console.warn("stock-news refresh failed", err);
         body.innerHTML = `<p class="empty">오프라인</p>`;
+      } finally {
+        isRefreshing = false;
+        refreshBtn.classList.remove("spinning");
+        refreshBtn.disabled = false;
       }
     }
 
+    refreshBtn.addEventListener("click", () => refresh({ force: true, showLoading: false }));
+
     refresh();
+    // Auto-refresh every 10 min — manual button for in-between.
     const interval = setInterval(refresh, 10 * 60 * 1000);
     return () => clearInterval(interval);
   },

@@ -1503,12 +1503,44 @@ body.mm-open { overflow: hidden; }
 .news-toolbar {
   display: flex;
   align-items: center;
-  justify-content: flex-end;
+  gap: 6px;
   padding: 4px 6px 8px;
   font-size: 11px;
   color: var(--text-faint);
 }
-.news-toolbar label { display: inline-flex; align-items: center; gap: 4px; }
+.news-toolbar .news-last {
+  flex: 1;
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+  color: var(--text-faint);
+}
+.news-toolbar label {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+.news-refresh {
+  background: transparent;
+  border: 1px solid var(--line);
+  color: var(--text-dim);
+  width: 22px;
+  height: 22px;
+  border-radius: 4px;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  transition: background 0.12s, color 0.12s, border-color 0.12s;
+}
+.news-refresh:hover {
+  color: var(--accent);
+  border-color: var(--accent-line);
+  background: var(--accent-soft);
+}
+.news-refresh:disabled { cursor: wait; }
+.news-refresh .icon { width: 12px; height: 12px; }
+.news-refresh.spinning .icon { animation: news-spin 0.8s linear infinite; }
+@keyframes news-spin { to { transform: rotate(360deg); } }
 .news-per-ticker {
   background: var(--bg-base);
   border: 1px solid var(--line-strong);

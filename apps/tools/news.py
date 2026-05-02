@@ -59,11 +59,16 @@ async def search_news(
     max_results: int = 5,
     days: int = 7,
     topic: str = "news",
+    bypass_cache: bool = False,
 ) -> list[dict[str, Any]]:
     """Tavily search. Returns a normalised list of news items.
 
     Each item: {title, url, content, published_date?, score?, source?}
     Empty list on missing key / API failure (fail-quiet).
+
+    When *bypass_cache* is True, the cached entry for this query is
+    discarded and a fresh API call is made — used by the widget's
+    manual refresh button.
     """
     key = os.environ.get("TAVILY_API_KEY", "").strip()
     if not key:
@@ -71,9 +76,13 @@ async def search_news(
 
     cache_key = (query.strip(), max_results, days, topic)
     now = time.monotonic()
-    cached = _cache.get(cache_key)
-    if cached and (now - cached[0]) < _CACHE_TTL_S:
-        return cached[1]
+
+    if bypass_cache:
+        _cache.pop(cache_key, None)
+    else:
+        cached = _cache.get(cache_key)
+        if cached and (now - cached[0]) < _CACHE_TTL_S:
+            return cached[1]
 
     async with _lock:
         cached = _cache.get(cache_key)
@@ -118,7 +127,11 @@ async def search_news(
 
 
 async def search_stock_news(
-    ticker: str, *, max_results: int = 3, days: int = 7
+    ticker: str,
+    *,
+    max_results: int = 3,
+    days: int = 7,
+    bypass_cache: bool = False,
 ) -> list[dict[str, Any]]:
     """Convenience wrapper — searches for news about a stock ticker."""
     # Strip Korean/global suffixes for the search query so headlines find
@@ -128,6 +141,7 @@ async def search_stock_news(
         f"{bare} stock news",
         max_results=max_results,
         days=days,
+        bypass_cache=bypass_cache,
     )
 
 

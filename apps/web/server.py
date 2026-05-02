@@ -506,8 +506,13 @@ def create_app(
         tickers: str = "",
         per_ticker: int = 3,
         days: int = 7,
+        force: bool = False,
     ) -> Any:
-        """Per-ticker news. Returns {ticker: [items]} keyed by input ticker."""
+        """Per-ticker news. Returns {ticker: [items]} keyed by input ticker.
+
+        When *force* is true, the Tavily client cache is bypassed for these
+        queries — wired to the widget's manual refresh button.
+        """
         _require_loopback(request)
         from apps.tools.news import search_stock_news
         ticker_list = [t.strip().upper() for t in tickers.split(",") if t.strip()]
@@ -515,7 +520,9 @@ def create_app(
         days = max(1, min(int(days), 30))
 
         async def _one(t: str) -> tuple[str, list[dict[str, Any]]]:
-            items = await search_stock_news(t, max_results=per_ticker, days=days)
+            items = await search_stock_news(
+                t, max_results=per_ticker, days=days, bypass_cache=bool(force)
+            )
             return t, items
 
         import asyncio as _asyncio
