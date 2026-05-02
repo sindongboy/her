@@ -44,10 +44,12 @@ register({
     }
 
     document.addEventListener("her:turn-complete", refresh);
+    document.addEventListener("her:memory-added", refresh);
     refresh();
 
     return () => {
       document.removeEventListener("her:turn-complete", refresh);
+      document.removeEventListener("her:memory-added", refresh);
     };
   },
 });

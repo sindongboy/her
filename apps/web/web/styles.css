@@ -1385,3 +1385,20 @@ body.mm-open { overflow: hidden; }
 .message.memory-added .ma-kind.note { color: var(--c-note); background: var(--c-note-bg); }
 .message.memory-added .ma-text { color: var(--text); }
 .message.memory-added .ma-text b { color: var(--accent); font-weight: 600; }
+
+/* Facts widget — grouped by person */
+.widget-facts .widget-body { padding: 6px; }
+.facts-list { display: flex; flex-direction: column; gap: 2px; }
+.facts-person-head {
+  font-size: 10.5px;
+  font-weight: 600;
+  letter-spacing: 0.4px;
+  text-transform: uppercase;
+  color: var(--c-fact);
+  padding: 6px 8px 2px;
+  list-style: none;
+}
+.probe-list .probe-item.fact { border-left: 2px solid var(--c-fact); }
+.probe-list .probe-item.fact .pred { color: var(--text-dim); }
+.probe-list .probe-item.fact .arrow { color: var(--text-faint); margin: 0 4px; }
+.probe-list .probe-item.fact .obj { color: var(--text); }

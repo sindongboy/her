@@ -50,11 +50,13 @@ register({
     }
 
     document.addEventListener("her:turn-complete", refresh);
+    document.addEventListener("her:memory-added", refresh);
     const offSid = on("sessionId", refresh);
     refresh();
 
     return () => {
       document.removeEventListener("her:turn-complete", refresh);
+      document.removeEventListener("her:memory-added", refresh);
       offSid?.();
     };
   },

@@ -3,6 +3,7 @@
 import { boot } from "/static/widgets/index.js";
 import "/static/widgets/types/sessions.js";
 import "/static/widgets/types/recall.js";
+import "/static/widgets/types/facts.js";
 import "/static/widgets/types/notes.js";
 import "/static/widgets/types/people.js";
 import "/static/widgets/types/clock.js";

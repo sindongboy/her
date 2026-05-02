@@ -10,7 +10,7 @@ const CONFIG_KEY = "her.widgets";
 
 const DEFAULT_CONFIG = {
   schema: 1,
-  panels: { left: ["sessions"], right: ["recall", "notes", "people"] },
+  panels: { left: ["sessions"], right: ["recall", "facts", "notes", "people"] },
   settings: {},
 };
 
