@@ -7,10 +7,19 @@ const input = document.getElementById("input");
 const sendBtn = document.getElementById("send");
 const orb = document.getElementById("orb");
 const statusText = document.getElementById("status-text");
+const welcomeEl = document.getElementById("welcome");
 
 let socket = null;
 let currentAssistant = null; // DOM node accumulating tokens
 let pendingTurn = false;
+
+function showWelcome() {
+  if (welcomeEl) welcomeEl.classList.remove("hidden");
+}
+
+function hideWelcome() {
+  if (welcomeEl) welcomeEl.classList.add("hidden");
+}
 
 function setStatus(label, mode) {
   statusText.textContent = label;
@@ -18,21 +27,20 @@ function setStatus(label, mode) {
 }
 
 function renderMessage(role, content) {
+  hideWelcome();
   const el = document.createElement("article");
   el.className = `message ${role}`;
-  const label = document.createElement("div");
-  label.className = "role-label";
-  label.textContent = role === "user" ? "나" : role === "assistant" ? "비서" : role;
   const body = document.createElement("div");
   body.className = "body";
   body.textContent = content;
-  el.append(label, body);
+  el.append(body);
   messagesEl.append(el);
   messagesEl.scrollTop = messagesEl.scrollHeight;
   return body;
 }
 
 function renderError(message) {
+  hideWelcome();
   const el = document.createElement("article");
   el.className = "message error";
   el.textContent = `⚠ ${message}`;
@@ -41,17 +49,26 @@ function renderError(message) {
 }
 
 function clearMessages() {
-  messagesEl.innerHTML = "";
+  // Remove only message articles, preserve the welcome node.
+  for (const node of messagesEl.querySelectorAll(".message")) node.remove();
 }
 
 async function loadSessionMessages(sessionId) {
   clearMessages();
-  if (!sessionId) return;
+  if (!sessionId) {
+    showWelcome();
+    return;
+  }
   try {
     const r = await fetch(`/api/sessions/${sessionId}/messages`);
     if (!r.ok) throw new Error(`HTTP ${r.status}`);
     const msgs = await r.json();
-    for (const m of msgs) renderMessage(m.role, m.content);
+    if (msgs.length === 0) {
+      showWelcome();
+    } else {
+      hideWelcome();
+      for (const m of msgs) renderMessage(m.role, m.content);
+    }
   } catch (err) {
     renderError(`이전 메시지 로드 실패: ${err.message}`);
   }
@@ -156,6 +173,17 @@ input.addEventListener("input", () => {
   input.style.height = "auto";
   input.style.height = Math.min(input.scrollHeight, 200) + "px";
 });
+
+// Suggestion chips on the welcome screen prefill the input.
+if (welcomeEl) {
+  welcomeEl.addEventListener("click", (ev) => {
+    const chip = ev.target.closest(".suggest-chip");
+    if (!chip) return;
+    input.value = chip.dataset.prompt || chip.textContent.trim();
+    input.dispatchEvent(new Event("input"));
+    input.focus();
+  });
+}
 
 on("sessionId", (sid) => {
   loadSessionMessages(sid);

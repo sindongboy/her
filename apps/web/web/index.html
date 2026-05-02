@@ -11,9 +11,10 @@
       <header class="topbar">
         <div class="brand">
           <span class="logo">her</span>
+          <span class="brand-divider" aria-hidden="true"></span>
           <span class="tagline" id="session-title">새 대화</span>
         </div>
-        <div class="status">
+        <div class="status-pill">
           <span id="orb" class="orb idle" aria-hidden="true"></span>
           <span id="status-text" class="status-text">준비됨</span>
         </div>
@@ -30,7 +31,27 @@
       </aside>
 
       <main class="chat-panel" aria-label="채팅">
-        <div id="messages" class="messages" role="log" aria-live="polite"></div>
+        <div id="messages" class="messages" role="log" aria-live="polite">
+          <div id="welcome" class="welcome">
+            <div class="welcome-mark">her</div>
+            <p class="welcome-greeting">무엇을 도와드릴까요?</p>
+            <p class="welcome-hint">기억과 일정을 기반으로 가족처럼 챙겨드려요.</p>
+            <div class="suggest-grid" role="group" aria-label="추천 질문">
+              <button type="button" class="suggest-chip" data-prompt="어머니 생신 선물 추천해줘">
+                어머니 생신 선물 추천
+              </button>
+              <button type="button" class="suggest-chip" data-prompt="오늘 저녁 메뉴 정해줘">
+                오늘 저녁 메뉴 정해줘
+              </button>
+              <button type="button" class="suggest-chip" data-prompt="이번 주 일정 정리해줘">
+                이번 주 일정 정리
+              </button>
+              <button type="button" class="suggest-chip" data-prompt="최근 기억해둔 메모 보여줘">
+                최근 메모 보여줘
+              </button>
+            </div>
+          </div>
+        </div>
         <form id="composer" class="composer" autocomplete="off">
           <div class="input-wrap">
             <textarea
@@ -54,7 +75,7 @@
 
         <section class="probe-section" data-section="recall">
           <div class="section-head">
-            <span class="section-label">이번 답변에 떠올린 기억</span>
+            <span class="section-label" data-icon="sparkles">이번 답변에 떠올린 기억</span>
           </div>
           <div id="probe-recall" class="probe-recall">
             <p class="empty">질문을 보내면 채워집니다</p>
