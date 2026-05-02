@@ -55,9 +55,16 @@ _SUMMARY_MAX_CHARS = 200
 _TITLE_MAX_CHARS = 40
 
 _SYSTEM_BASE = """당신은 따뜻하고 가까운 가족 같은 AI 비서입니다.
-사용자와 그 가족을 기억하고, 일정과 이벤트를 챙기며, 먼저 제안합니다.
+사용자와 그 가족을 기억하고 도와줍니다.
 한국어로 자연스럽게 대화하세요. 사용자가 영어로 말하면 영어로 답하세요.
-응답은 텍스트 웹 UI 에 표시되므로 마크다운을 적절히 활용해 가독성을 높이세요."""
+응답은 텍스트 웹 UI 에 표시되므로 마크다운을 적절히 활용해 가독성을 높이세요.
+
+응답 규칙 (엄격):
+- 답변은 사용자의 *지금 이 질문* 에만 집중하세요.
+- 사용자가 묻지 않은 가족·일정·과거 대화·메모를 자발적으로 끌어오지 마세요.
+- 단순 요청 (추가·삭제·저장·수정 등) 이면 짧게 확인만 하세요. 부연 설명·관련 제안 금지.
+- [MEMORY] 블록의 항목은 *질문에 답하기 위한 참고* 용이지, 모두 응답에 언급할 필요 없음.
+- 확신이 없으면 추측·제안하지 말고 사용자에게 묻거나 짧게 답하세요."""
 
 
 @dataclass(slots=True, frozen=True)
@@ -94,11 +101,17 @@ _REMEMBER_TRIGGERS: tuple[str, ...] = (
     "잊지마",
     "잊지 마",
     "잊지말",
+    # Action verbs the user actually uses to add memory items
+    "추가해",     # "X 추가해", "X 추가해줘"
+    "등록해",     # "X 등록해줘"
+    "저장해",     # "X 저장해줘"
     "remember this",
     "remember that",
     "make a note",
     "note this",
     "save this",
+    "add a contact",
+    "add this person",
 )
 
 
@@ -706,9 +719,20 @@ def _load_persona() -> str:
         return _SYSTEM_BASE
 
 
+_RELEVANCE_GUARDRAIL = """
+
+[필수 응답 규칙 — 위 페르소나보다 우선]
+- 답변은 사용자의 *지금 이 한 메시지* 에만 집중하세요.
+- 사용자가 묻지 않은 과거 대화·메모·일정·다른 인물 정보를 자발적으로 끌어오지 마세요.
+- 단순 행동 요청 (추가·삭제·저장·수정·조회) 이면 짧게 확인만 하세요.
+  부연 설명·관련 제안·"혹시 …도 …하세요?" 같은 후속 제안 금지.
+- [MEMORY] 블록은 답에 *필요할 때만* 참고하는 자료입니다. 보였다고 다 언급하지 마세요.
+- 메모리에 직접 답이 있으면 그것만 답하고 다른 항목은 무시하세요."""
+
+
 def _build_system_prompt() -> str:
     base = _load_persona()
-    return base + get_world_state_block()
+    return base + _RELEVANCE_GUARDRAIL + get_world_state_block()
 
 
 def _format_remembered_addon(remembered: dict[str, Any]) -> str:
