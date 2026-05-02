@@ -86,7 +86,7 @@ ul { list-style: none; margin: 0; padding: 0; }
 
 .app {
   display: grid;
-  grid-template-columns: 240px 1fr 320px;
+  grid-template-columns: 320px 1fr 320px;
   grid-template-rows: 52px 1fr;
   grid-template-areas:
     "top top top"
