@@ -22,3 +22,21 @@ export GEMINI_API_KEY="REPLACE_ME"
 # export HER_DB_PATH="${PWD}/data/db.sqlite"
 # export HER_AGENT_MODEL="gemini-3.1-pro-preview"
 # export HER_WEB_PORT="8765"
+
+# ── Optional: Stocks widget ───────────────────────────────────────────
+# Used by the stocks widget. Each provider is independent — set only
+# the ones you actually use.
+#
+# Finnhub (global, free real-time tier)         https://finnhub.io
+# export FINNHUB_API_KEY="REPLACE_ME"
+#
+# Polygon (US stocks, fallback / pro features)  https://polygon.io
+# export POLYGON_API_KEY="REPLACE_ME"
+#
+# Kiwoom REST API (KOSPI/KOSDAQ).              https://www.kiwoom.com
+#   APP_KEY  = REST API "App Key"
+#   SECRET   = REST API "App Secret"
+#   BASE_URL = api.kiwoom.com (real) or mockapi.kiwoom.com (sandbox)
+# export KIWOOM_APP_KEY="REPLACE_ME"
+# export KIWOOM_APP_SECRET="REPLACE_ME"
+# export KIWOOM_BASE_URL="https://api.kiwoom.com"

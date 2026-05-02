@@ -209,6 +209,87 @@ def create_app(
             for r in rows
         ]
 
+    # ── /api/widgets/* ────────────────────────────────────────────────────
+
+    @app.get("/api/widgets/weather")
+    async def widget_weather(request: Request) -> Any:
+        _require_loopback(request)
+        from apps.tools.weather import WeatherUnavailable, get_current_weather
+        from apps.settings import load_settings
+        s = load_settings()
+        try:
+            snap = await get_current_weather(
+                lat=s.location_lat,
+                lon=s.location_lon,
+                location_name=s.location_name,
+            )
+            return {
+                "temperature_c": snap.temperature_c,
+                "apparent_c": snap.feels_like_c,
+                "humidity_pct": snap.humidity_pct,
+                "wind_ms": round(snap.wind_kmh / 3.6, 1),
+                "condition_code": snap.weather_code,
+                "condition_ko": snap.weather_text_ko,
+                "location_name": snap.location_name,
+                "fetched_at": snap.fetched_at_iso,
+            }
+        except WeatherUnavailable as exc:
+            raise HTTPException(status_code=503, detail=str(exc))
+
+    @app.get("/api/widgets/calendar")
+    async def widget_calendar(request: Request) -> Any:
+        _require_loopback(request)
+        from apps.tools.calendar_mac import CalendarUnavailable, get_events
+        from apps.settings import load_settings
+        s = load_settings()
+
+        merged: list[dict[str, Any]] = []
+
+        try:
+            events = await get_events(
+                days_ahead=int(getattr(s, "calendar_lookahead_days", 14)),
+                max_events=50,
+            )
+            for e in events:
+                merged.append({
+                    "title": e.title,
+                    "calendar": e.calendar_name,
+                    "all_day": e.is_all_day,
+                    "when_at": e.starts_at_iso,
+                    "end_at": e.ends_at_iso,
+                    "source": "macos",
+                })
+        except CalendarUnavailable as exc:
+            log.debug("widget.calendar.macos_unavailable", error=str(exc))
+
+        # Also include DB events (Consolidator-derived).
+        try:
+            db_events = store.list_upcoming_events(within_hours=24 * 14)
+            for ev in db_events:
+                merged.append({
+                    "title": ev.title,
+                    "calendar": "her",
+                    "all_day": False,
+                    "when_at": ev.when_at,
+                    "end_at": None,
+                    "source": "db",
+                })
+        except Exception as exc:
+            log.warning("widget.calendar.db_query_failed", error=str(exc))
+
+        merged.sort(key=lambda e: e["when_at"] or "")
+        return merged[:30]
+
+    @app.get("/api/widgets/stocks")
+    async def widget_stocks(request: Request, tickers: str = "") -> Any:
+        _require_loopback(request)
+        from apps.tools.stocks import get_quotes
+        ticker_list = [t.strip().upper() for t in tickers.split(",") if t.strip()]
+        if not ticker_list:
+            return []
+        quotes = await get_quotes(ticker_list)
+        return quotes
+
     @app.get("/api/memory/probe")
     async def memory_probe(request: Request, session_id: int | None = None) -> Any:
         _require_loopback(request)

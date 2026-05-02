@@ -20,14 +20,8 @@
         </div>
       </header>
 
-      <aside class="left-panel" aria-label="대화 세션 목록">
-        <div class="panel-head">
-          <h2 data-icon="message">대화</h2>
-          <button id="new-session" class="ghost-btn" type="button" data-icon="plus">
-            새 대화
-          </button>
-        </div>
-        <ul id="session-list" class="session-list" role="list"></ul>
+      <aside class="rail" id="left-rail" aria-label="왼쪽 위젯">
+        <div class="widget-stack"></div>
       </aside>
 
       <main class="chat-panel" aria-label="채팅">
@@ -68,39 +62,14 @@
         </form>
       </main>
 
-      <aside class="right-panel" aria-label="메모리 프로브">
-        <div class="panel-head">
-          <h2 data-icon="brain">메모리 프로브</h2>
-        </div>
-
-        <section class="probe-section" data-section="recall">
-          <div class="section-head">
-            <span class="section-label" data-icon="sparkles">이번 답변에 떠올린 기억</span>
-          </div>
-          <div id="probe-recall" class="probe-recall">
-            <p class="empty">질문을 보내면 채워집니다</p>
-          </div>
-        </section>
-
-        <section class="probe-section" data-section="notes">
-          <div class="section-head">
-            <span class="section-label" data-icon="note">메모</span>
-          </div>
-          <ul id="recent-notes" class="probe-list"></ul>
-        </section>
-
-        <section class="probe-section" data-section="people">
-          <div class="section-head">
-            <span class="section-label" data-icon="user">사람</span>
-          </div>
-          <ul id="recent-people" class="probe-list"></ul>
-        </section>
+      <aside class="rail" id="right-rail" aria-label="오른쪽 위젯">
+        <div class="widget-stack"></div>
       </aside>
     </div>
 
     <script type="module" src="/static/icons.js"></script>
-    <script type="module" src="/static/sessions.js"></script>
+    <script type="module" src="/static/topbar.js"></script>
     <script type="module" src="/static/chat.js"></script>
-    <script type="module" src="/static/memory.js"></script>
+    <script type="module" src="/static/widgets/main.js"></script>
   </body>
 </html>
