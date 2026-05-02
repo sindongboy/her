@@ -1425,3 +1425,61 @@ body.mm-open { overflow: hidden; }
   outline: none;
 }
 .cal-max-select:focus { border-color: var(--accent-line); }
+
+/* Sessions widget — hover actions */
+.session-item {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 4px;
+  align-items: center;
+}
+.session-main { min-width: 0; cursor: pointer; }
+.session-main .title {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  font-size: 13.5px;
+  color: var(--text);
+}
+.session-main .meta {
+  font-size: 11.5px;
+  color: var(--text-faint);
+  margin-top: 2px;
+  font-variant-numeric: tabular-nums;
+}
+.session-actions {
+  display: flex;
+  gap: 1px;
+  opacity: 0;
+  transition: opacity 0.12s;
+}
+.session-item:hover .session-actions { opacity: 1; }
+.session-item.active .session-actions { opacity: 0.6; }
+.session-item.active:hover .session-actions { opacity: 1; }
+.session-actions button {
+  background: transparent;
+  border: none;
+  color: var(--text-faint);
+  width: 22px;
+  height: 22px;
+  border-radius: 4px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  cursor: pointer;
+}
+.session-actions button:hover { background: var(--bg-hover); color: var(--text); }
+.session-actions button[data-action="archive"]:hover { color: var(--c-error); }
+.session-actions button .icon { width: 12px; height: 12px; }
+
+.session-rename-input {
+  width: 100%;
+  background: var(--bg-base);
+  border: 1px solid var(--accent-line);
+  border-radius: 4px;
+  color: var(--text);
+  padding: 4px 6px;
+  font-size: 13px;
+  outline: none;
+}

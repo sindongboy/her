@@ -1,4 +1,5 @@
 // Sessions widget — list of recent chat sessions; click loads a session.
+// Hover any item to reveal ✏ rename and ✕ archive actions.
 import { register } from "/static/widgets/index.js";
 import { state, on, set } from "/static/state.js";
 import { iconHTML } from "/static/icons.js";
@@ -31,22 +32,91 @@ register({
 
     let sessions = [];
 
+    function escape(s) {
+      return String(s ?? "")
+        .replace(/&/g, "&amp;")
+        .replace(/</g, "&lt;")
+        .replace(/>/g, "&gt;")
+        .replace(/"/g, "&quot;");
+    }
+
     function render() {
       listEl.innerHTML = "";
       for (const s of sessions) {
         const li = document.createElement("li");
         li.className = "session-item" + (s.id === state.sessionId ? " active" : "");
         li.dataset.id = s.id;
-        const title = document.createElement("div");
-        title.className = "title";
-        title.textContent = s.title || s.summary || `세션 ${s.id}`;
-        const meta = document.createElement("div");
-        meta.className = "meta";
-        meta.textContent = fmtTime(s.last_active_at);
-        li.append(title, meta);
-        li.addEventListener("click", () => set("sessionId", s.id));
+        const titleText = s.title || s.summary || `세션 ${s.id}`;
+        li.innerHTML = `
+          <div class="session-main">
+            <div class="title">${escape(titleText)}</div>
+            <div class="meta">${escape(fmtTime(s.last_active_at))}</div>
+          </div>
+          <div class="session-actions">
+            <button data-action="rename" title="제목 편집"><span class="icon">${iconHTML("pencil")}</span></button>
+            <button data-action="archive" title="삭제 (아카이브)"><span class="icon">${iconHTML("x")}</span></button>
+          </div>
+        `;
+        const main = li.querySelector(".session-main");
+        main.addEventListener("click", () => set("sessionId", s.id));
+        li.querySelector("[data-action='rename']").addEventListener("click", (ev) => {
+          ev.stopPropagation();
+          startRename(li, s);
+        });
+        li.querySelector("[data-action='archive']").addEventListener("click", (ev) => {
+          ev.stopPropagation();
+          archiveSession(s);
+        });
         listEl.append(li);
       }
+    }
+
+    function startRename(li, s) {
+      const main = li.querySelector(".session-main");
+      const current = s.title || s.summary || `세션 ${s.id}`;
+      main.innerHTML = `
+        <input class="session-rename-input" value="${escape(current)}" />
+      `;
+      const input = main.querySelector("input");
+      input.focus();
+      input.select();
+      const commit = async () => {
+        const next = input.value.trim();
+        if (next && next !== current) {
+          try {
+            const r = await fetch(`/api/sessions/${s.id}`, {
+              method: "PATCH",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ title: next }),
+            });
+            if (!r.ok) throw new Error(`HTTP ${r.status}`);
+            s.title = next;
+          } catch (err) {
+            console.warn("rename failed", err);
+          }
+        }
+        await refresh();
+      };
+      const cancel = () => { render(); };
+      input.addEventListener("blur", commit);
+      input.addEventListener("keydown", (ev) => {
+        if (ev.isComposing || ev.keyCode === 229) return;
+        if (ev.key === "Enter") { ev.preventDefault(); input.blur(); }
+        else if (ev.key === "Escape") { ev.preventDefault(); cancel(); }
+      });
+    }
+
+    async function archiveSession(s) {
+      const ok = confirm(`"${s.title || s.summary || `세션 ${s.id}`}" 삭제하시겠어요?\n(아카이브로 이동 — DB 에는 남아있음)`);
+      if (!ok) return;
+      try {
+        const r = await fetch(`/api/sessions/${s.id}`, { method: "DELETE" });
+        if (!r.ok) throw new Error(`HTTP ${r.status}`);
+        if (state.sessionId === s.id) set("sessionId", null);
+      } catch (err) {
+        console.warn("archive failed", err);
+      }
+      await refresh();
     }
 
     async function refresh() {

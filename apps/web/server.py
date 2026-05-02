@@ -152,6 +152,17 @@ def create_app(
             for m in msgs
         ]
 
+    @app.patch("/api/sessions/{session_id}")
+    async def update_session(session_id: int, request: Request) -> Any:
+        _require_loopback(request)
+        if store.get_session(session_id) is None:
+            raise HTTPException(status_code=404, detail="session not found")
+        body = await request.json()
+        title = body.get("title")
+        if isinstance(title, str):
+            store.set_session_title(session_id, title.strip())
+        return {"ok": True}
+
     @app.delete("/api/sessions/{session_id}")
     async def archive_session(session_id: int, request: Request) -> Any:
         _require_loopback(request)
