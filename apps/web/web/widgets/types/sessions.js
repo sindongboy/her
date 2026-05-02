@@ -16,19 +16,50 @@ function fmtTime(iso) {
   });
 }
 
+const VISIBLE_OPTIONS = [3, 5, 7, 10, 15];
+const DEFAULT_VISIBLE = 5;
+
 register({
   type: "sessions",
   title: "대화",
   icon: "message",
   description: "최근 채팅 세션 목록",
 
-  mount(container) {
+  mount(container, ctx) {
+    let visible = Number(ctx.settings?.visible) || DEFAULT_VISIBLE;
+
     container.innerHTML = `
+      <div class="sessions-toolbar">
+        <label>최근 <select class="sessions-visible-select"></select> 개</label>
+      </div>
       <ul class="session-list" role="list"></ul>
       <button type="button" class="session-new-btn"><span class="icon">${iconHTML("plus")}</span><span>새 대화</span></button>
     `;
     const listEl = container.querySelector(".session-list");
     const newBtn = container.querySelector(".session-new-btn");
+    const visSel = container.querySelector(".sessions-visible-select");
+
+    const opts = new Set([...VISIBLE_OPTIONS, visible]);
+    for (const n of [...opts].sort((a, b) => a - b)) {
+      const o = document.createElement("option");
+      o.value = String(n); o.textContent = String(n);
+      if (n === visible) o.selected = true;
+      visSel.append(o);
+    }
+
+    function applyMaxHeight() {
+      // Each .session-item is roughly 56px tall (padding + 2 lines + gap).
+      // Setting CSS custom prop drives a max-height so the body scrolls when
+      // there are more rows than `visible`.
+      listEl.style.setProperty("--visible-rows", String(visible));
+    }
+
+    visSel.addEventListener("change", () => {
+      visible = Number(visSel.value) || DEFAULT_VISIBLE;
+      ctx.updateSettings({ ...(ctx.settings || {}), visible });
+      applyMaxHeight();
+    });
+    applyMaxHeight();
 
     let sessions = [];
 
